@@ -1,0 +1,108 @@
+# HiringCompass local stack. Start core: docker compose up --build
+# Optional profiles: worker (Phase 3), web (Phase 4), see README.
+
+# Shared environment/volumes for backend containers.
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  environment:
+    LOG_DIR: /app/logs
+    ERROR_DIR: /app/errors
+  volumes:
+    - hc_logs:/app/logs        # info/warning logs (isolated volume)
+    - hc_errors:/app/errors    # exception logs (isolated volume)
+    - hc_files:/app/storage    # CVs, exports, quarantine
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  # PostgreSQL 16 + pgvector: business data, work queue, LangGraph checkpoints, embeddings.
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - hc_pgdata:/var/lib/postgresql/data
+      - ./docker/db/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # FastAPI application.
+  api:
+    <<: *backend
+    environment:
+      LOG_DIR: /app/logs
+      ERROR_DIR: /app/errors
+      WORKER_ID: api
+    ports:
+      - "8000:8000"
+
+  # Background worker (claims durable work items); enabled once the worker module exists.
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker.runner"]
+    profiles: ["worker"]
+
+  # Local LLM + embeddings server (free, open source).
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - hc_ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+  # One-shot job that pulls the configured models into the ollama volume.
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${LLM_MODEL} && ollama pull ${EMBEDDING_MODEL}"]
+    restart: "no"
+
+  # Self-hosted LiveKit SFU for 1-on-1 interviews (separate per-participant tracks).
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--dev", "--bind", "0.0.0.0"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    restart: unless-stopped
+
+  # Local SMTP sink with web inbox (http://localhost:8025) for invitation links.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    restart: unless-stopped
+
+  # React frontend; enabled once ./frontend exists.
+  web:
+    build: ./frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    profiles: ["web"]
+
+# Named volumes: logs and errors are separate so each can be inspected, rotated or wiped independently.
+volumes:
+  hc_pgdata:
+  hc_files:
+  hc_logs:
+  hc_errors:
+  hc_ollama:
