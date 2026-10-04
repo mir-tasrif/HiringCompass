@@ -56,7 +56,5 @@ Candidate documents and interview data are sensitive. Restrict access, avoid log
 4. Add interview and transcription services, then interview analysis and consolidated assessment.
 5. Complete security, reliability, performance, end-to-end, and clean-machine release checks.
 
-## License
 
-License to be determined.
 
