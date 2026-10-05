@@ -12,21 +12,30 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.core.logging import bind_context, get_logger, log_exception, setup_logging
+from app.core.logging import bind_context, get_logger, log_exception, setup_logging
+from app.db.session import check_db
+from app.graphs.common.checkpointer import open_checkpointer
+from app.api.errors import register_error_handlers
+
+
 
 settings = get_settings()
 logger = get_logger("app.main")
 
 
-# Startup/shutdown hook: configure logging and runtime directories (graphs are wired in Phase 4).
+# Startup/shutdown hook: logging, durable checkpointer (graphs are wired in Phase 4).
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging("api", settings)
     logger.info("api starting", extra={"env": settings.app_env})
-    yield
+    async with open_checkpointer() as checkpointer:
+        app.state.checkpointer = checkpointer
+        yield
     logger.info("api stopping")
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+register_error_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,3 +65,9 @@ async def request_guard(request: Request, call_next):
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
+
+# Readiness endpoint: confirms the database connection works.
+@app.get("/health/db", tags=["system"])
+async def health_db() -> JSONResponse:
+    ok = await check_db()
+    return JSONResponse(status_code=200 if ok else 503, content={"db": "ok" if ok else "unavailable"})

@@ -90,15 +90,15 @@ services:
       - "1025:1025"
     restart: unless-stopped
 
-  # React frontend; enabled once ./frontend exists.
+  # React frontend served by nginx; proxies /api to the backend.
   web:
     build: ./frontend
     ports:
       - "5173:80"
     depends_on:
       - api
-    profiles: ["web"]
-
+    restart: unless-stopped
+    
 # Named volumes: logs and errors are separate so each can be inspected, rotated or wiped independently.
 volumes:
   hc_pgdata:

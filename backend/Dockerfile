@@ -22,6 +22,8 @@ RUN useradd --create-home --uid 1000 hc \
     && chown -R hc:hc /app
 
 COPY --chown=hc:hc app ./app
+COPY --chown=hc:hc alembic.ini ./
+COPY --chown=hc:hc migrations ./migrations
 
 USER hc
 EXPOSE 8000
@@ -30,4 +32,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
