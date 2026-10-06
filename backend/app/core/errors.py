@@ -39,3 +39,22 @@ class UploadRejected(PermanentError):
 # The model kept returning output that does not match the requested schema.
 class StructuredOutputError(PermanentError):
     category = "llm_output_invalid"
+
+
+
+
+# An approval request/decision conflicts with its stored state (stale, duplicate, wrong option).
+class ApprovalError(PermanentError):
+    category = "approval_conflict"
+
+
+
+
+# Missing, invalid or expired credentials (HTTP 401).
+class AuthError(PermanentError):
+    category = "auth_failed"
+
+
+# Authenticated, but the role may not do this (HTTP 403).
+class ForbiddenError(PermanentError):
+    category = "forbidden"

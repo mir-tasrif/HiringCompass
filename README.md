@@ -29,17 +29,6 @@ Each candidate workflow is isolated by job and candidate identifiers. Shared per
 - Docker Compose for local development
 
 
-## Repository structure
-
-```text
-.
-├── docs/
-│   
-├── .env.example
-├── .gitignore
-└── README.md
-```
-
 ## Local setup
 
 Application setup instructions will be added when the backend and frontend are implemented. Do not put credentials in source control. Copy `.env.example` to `.env` and provide local values when services are configured.
@@ -58,7 +47,7 @@ Candidate documents and interview data are sensitive. Restrict access, avoid log
 
 
 
-
+## Repository structure
 ```
 HiringCompass
 ├─ .dockerignore
