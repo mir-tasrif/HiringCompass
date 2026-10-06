@@ -1,45 +1,31 @@
-import { Status, useHealth } from "./hooks/useHealth";
+import { Navigate, Route, Routes } from "react-router-dom";
+import Layout from "./components/Layout";
+import RequireAuth from "./components/RequireAuth";
+import ComingSoon from "./pages/ComingSoon";
+import Dashboard from "./pages/Dashboard";
+import Login from "./pages/Login";
 
-const LABEL: Record<Status, string> = { checking: "Checking…", up: "Operational", down: "Unavailable" };
-
-// One row in the system status card.
-function StatusRow({ name, status }: { name: string; status: Status }) {
-  return (
-    <li className="status-row">
-      <span>{name}</span>
-      <span className={`pill pill-${status}`} role="status">
-        {LABEL[status]}
-      </span>
-    </li>
-  );
-}
-
-// Application shell: branded header, system status, and the area where feature pages will mount.
+// Route table: public login, and every other page inside the authenticated layout.
 export default function App() {
-  const { api, db, env, checkedAt, refresh } = useHealth();
-
   return (
-    <div className="shell">
-      <header className="header">
-        <h1>HiringCompass</h1>
-        <p>An AI recruitment assistant that guides hiring teams with evidence-backed assessments, keeping humans in control of every decision.</p>
-      </header>
-      <main className="content">
-        <section className="card" aria-labelledby="status-title">
-          <h2 id="status-title">System status</h2>
-          <ul className="status-list">
-            <StatusRow name="API" status={api} />
-            <StatusRow name="Database" status={db} />
-          </ul>
-          <p className="muted">
-            {env ? `Environment: ${env}. ` : ""}
-            {checkedAt ? `Last checked ${checkedAt.toLocaleTimeString()}.` : "Waiting for first check."}
-          </p>
-          <button type="button" onClick={refresh}>
-            Check again
-          </button>
-        </section>
-      </main>
-    </div>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        element={
+          <RequireAuth>
+            <Layout />
+          </RequireAuth>
+        }
+      >
+        <Route index element={<Dashboard />} />
+        <Route path="jobs" element={<ComingSoon title="Jobs" description="Approved job descriptions will be listed and managed here." />} />
+        <Route path="candidates" element={<ComingSoon title="Candidates" description="Uploaded CVs, screening results and rankings will appear here." />} />
+        <Route path="interviews" element={<ComingSoon title="Interviews" description="Scheduled and live video interviews will appear here." />} />
+        <Route path="reviews" element={<ComingSoon title="Reviews" description="Pending human-review decisions will be queued here." />} />
+        <Route path="reports" element={<ComingSoon title="Reports" description="Candidate assessments and comparisons will appear here." />} />
+        <Route path="assistant" element={<ComingSoon title="Job Intelligence" description="The AI assistant for drafting and posting jobs is built in the next step." />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
   );
 }
