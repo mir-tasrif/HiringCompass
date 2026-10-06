@@ -12,3 +12,4 @@ pytest-asyncio==0.25.0
 httpx==0.28.1
 pymupdf==1.28.2
 python-multipart==0.0.32
+pgvector==0.5.0

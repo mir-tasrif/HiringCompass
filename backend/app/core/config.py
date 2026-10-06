@@ -58,22 +58,30 @@ class Settings(BaseSettings):
     seed_interviewer_email: str = "interviewer@example.com"
     seed_interviewer_password: str = "change_me"
 
-    # --- LLM / embeddings / RAG ---
-    llm_provider: Literal["ollama"] = "ollama"
-    ollama_base_url: str = "http://ollama:11434"
-    llm_model: str = "qwen2.5:7b-instruct"
+    # --- LLM (chat): one switch, LLM_PROFILE=local|remote ---
+    llm_profile: Literal["local", "remote"] = "local"
     llm_temperature: float = Field(default=0.0, ge=0, le=1)
     llm_seed: int = 42
     llm_timeout_seconds: int = Field(default=120, ge=1)
     llm_max_retries: int = Field(default=3, ge=0)
     llm_max_concurrency: int = Field(default=2, ge=1)
-    embedding_provider: Literal["ollama"] = "ollama"
+    llm_local_base_url: str = "http://ollama:11434/v1"
+    llm_local_api_key: str = "ollama"
+    llm_local_model: str = "qwen2.5:7b-instruct"
+    llm_local_json_mode: Literal["json_schema", "json_object"] = "json_schema"
+    llm_remote_base_url: str = ""
+    llm_remote_api_key: str = ""
+    llm_remote_model: str = ""
+    llm_remote_json_mode: Literal["json_schema", "json_object"] = "json_object"
+
+    # --- Embeddings / RAG (always local Ollama; the vector column is 768-dimensional) ---
+    embedding_base_url: str = "http://ollama:11434"
     embedding_model: str = "nomic-embed-text"
     embedding_dim: int = 768
     rag_top_k: int = Field(default=5, ge=1)
     rag_namespace_company: str = "company_hiring"
     rag_namespace_technical: str = "technical_docs"
-    rag_corpus_dir: Path = Path("/app/rag/corpora")
+    rag_corpus_dir: Path = Path("/app/app/rag/corpora")
 
     # --- Speech-to-text (switchable) ---
     stt_provider: Literal["faster_whisper", "google"] = "faster_whisper"
@@ -125,6 +133,35 @@ class Settings(BaseSettings):
             if bad:
                 raise ValueError(f"insecure placeholder values in production: {', '.join(bad)}")
         return self
+
+    # Remote profile needs all three connection values; fail at startup instead of at the first call.
+    @model_validator(mode="after")
+    def _require_remote_settings(self) -> "Settings":
+        if self.llm_profile == "remote":
+            missing = [n.upper() for n in ("llm_remote_base_url", "llm_remote_api_key", "llm_remote_model") if not getattr(self, n)]
+            if missing:
+                raise ValueError(f"LLM_PROFILE=remote requires: {', '.join(missing)}")
+        return self
+
+    # Active chat endpoint (OpenAI-compatible) for the selected profile.
+    @property
+    def llm_base_url(self) -> str:
+        return self.llm_remote_base_url if self.llm_profile == "remote" else self.llm_local_base_url
+
+    # Active API key for the selected profile.
+    @property
+    def llm_api_key(self) -> str:
+        return self.llm_remote_api_key if self.llm_profile == "remote" else self.llm_local_api_key
+
+    # Active chat model name for the selected profile.
+    @property
+    def llm_model(self) -> str:
+        return self.llm_remote_model if self.llm_profile == "remote" else self.llm_local_model
+
+    # How structured output is requested: full JSON schema, or plain JSON mode with the schema in the prompt.
+    @property
+    def llm_json_mode(self) -> str:
+        return self.llm_remote_json_mode if self.llm_profile == "remote" else self.llm_local_json_mode
 
     # CORS origins parsed from the comma-separated env value.
     @property

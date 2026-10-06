@@ -67,7 +67,7 @@ services:
       - ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/sh", "-c", "ollama pull ${LLM_MODEL} && ollama pull ${EMBEDDING_MODEL}"]
+    entrypoint: ["/bin/sh", "-c", "if [ '${LLM_PROFILE:-local}' = 'local' ]; then ollama pull ${LLM_LOCAL_MODEL}; fi; ollama pull ${EMBEDDING_MODEL}"]
     restart: "no"
 
   # Self-hosted LiveKit SFU for 1-on-1 interviews (separate per-participant tracks).

@@ -16,7 +16,7 @@ from app.core.logging import bind_context, get_logger, log_exception, setup_logg
 from app.db.session import check_db
 from app.graphs.common.checkpointer import open_checkpointer
 from app.api.errors import register_error_handlers
-
+from app.llm.client import get_llm_client
 
 
 settings = get_settings()
@@ -71,3 +71,14 @@ async def health() -> dict[str, str]:
 async def health_db() -> JSONResponse:
     ok = await check_db()
     return JSONResponse(status_code=200 if ok else 503, content={"db": "ok" if ok else "unavailable"})
+
+
+# Readiness endpoint: confirms the chat provider and embedding model are usable (None = provider can't list models).
+@app.get("/health/llm", tags=["system"])
+async def health_llm() -> JSONResponse:
+    try:
+        info = await get_llm_client().health()
+    except Exception:
+        return JSONResponse(status_code=503, content={"llm": "unavailable"})
+    ready = info["llm_model"] is not False and info["embedding_model"]
+    return JSONResponse(status_code=200 if ready else 503, content={"llm": "ok" if ready else "models_missing", **info})

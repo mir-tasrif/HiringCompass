@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 
 from app.db.base import Base, IdMixin, TimestampMixin
 
@@ -132,3 +133,37 @@ class AuditEvent(Base, IdMixin, TimestampMixin):
     entity_type: Mapped[str] = mapped_column(String(40))
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+
+
+
+# A document ingested into a knowledge namespace (company hiring policy or technical reference).
+class KnowledgeSource(Base, IdMixin, TimestampMixin):
+    __tablename__ = "knowledge_sources"
+    __table_args__ = (UniqueConstraint("namespace", "checksum", name="uq_knowledge_sources_ns_checksum"),)
+
+    namespace: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(300))
+    source_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64))
+
+
+# One embedded passage of a knowledge source; namespaces are never mixed at query time.
+class KnowledgeChunk(Base, IdMixin, TimestampMixin):
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        Index("ix_knowledge_chunks_namespace", "namespace"),
+        Index("ix_knowledge_chunks_source", "source_id"),
+        Index(
+            "ix_knowledge_chunks_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("knowledge_sources.id", ondelete="CASCADE"))
+    namespace: Mapped[str] = mapped_column(String(40))
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[Any] = mapped_column(Vector(768))

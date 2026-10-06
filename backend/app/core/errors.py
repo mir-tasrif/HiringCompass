@@ -33,3 +33,9 @@ class UploadRejected(PermanentError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+
+# The model kept returning output that does not match the requested schema.
+class StructuredOutputError(PermanentError):
+    category = "llm_output_invalid"
