@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _reject_insecure_production(self) -> "Settings":
         if self.app_env == "production":
-            bad = [n for n in ("jwt_secret", "postgres_password", "livekit_api_secret") if getattr(self, n) in _INSECURE_DEFAULTS]
+            bad = [n for n in ("jwt_secret", "postgres_password", "livekit_api_secret", "seed_interviewer_password") if getattr(self, n) in _INSECURE_DEFAULTS]
             if bad:
                 raise ValueError(f"insecure placeholder values in production: {', '.join(bad)}")
         return self

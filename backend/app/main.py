@@ -1,4 +1,4 @@
-"""FastAPI entrypoint (Phase 2 skeleton): logging, config, health, error-intercepting middleware."""
+"""FastAPI entrypoint: logging, config, health, auth, durable checkpointer, error-intercepting middleware."""
 
 from __future__ import annotations
 
@@ -10,24 +10,26 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.errors import register_error_handlers
+from app.api.routers.auth import router as auth_router
 from app.core.config import get_settings
 from app.core.logging import bind_context, get_logger, log_exception, setup_logging
-from app.core.logging import bind_context, get_logger, log_exception, setup_logging
-from app.db.session import check_db
+from app.db.session import SessionLocal, check_db
 from app.graphs.common.checkpointer import open_checkpointer
-from app.api.errors import register_error_handlers
 from app.llm.client import get_llm_client
-
+from app.services.users import ensure_seed_interviewer
 
 settings = get_settings()
 logger = get_logger("app.main")
 
 
-# Startup/shutdown hook: logging, durable checkpointer (graphs are wired in Phase 4).
+# Startup/shutdown hook: logging, seed interviewer, durable checkpointer (graphs are wired as routers arrive).
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging("api", settings)
     logger.info("api starting", extra={"env": settings.app_env})
+    async with SessionLocal() as session:
+        await ensure_seed_interviewer(session, settings)
     async with open_checkpointer() as checkpointer:
         app.state.checkpointer = checkpointer
         yield
@@ -61,10 +63,14 @@ async def request_guard(request: Request, call_next):
             return JSONResponse(status_code=500, content={"detail": "Internal server error", "request_id": request_id})
 
 
+app.include_router(auth_router)
+
+
 # Liveness endpoint used by Docker healthchecks.
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
+
 
 # Readiness endpoint: confirms the database connection works.
 @app.get("/health/db", tags=["system"])
