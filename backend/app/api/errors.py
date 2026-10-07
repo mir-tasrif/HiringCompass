@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.core.errors import AuthError, ForbiddenError, UploadRejected
+from app.core.errors import ApprovalError, AuthError, ConflictError, ForbiddenError, NotFoundError, UploadRejected
 
 # HTTP status per upload rejection code; anything else is 422.
 _UPLOAD_STATUS = {"too_large": 413, "bad_type": 415, "bad_extension": 415, "duplicate": 409}
@@ -27,3 +27,14 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ForbiddenError)
     async def forbidden_handler(_: Request, exc: ForbiddenError) -> JSONResponse:
         return JSONResponse(status_code=403, content={"detail": str(exc), "code": "forbidden"})
+
+    # Unknown or foreign resource: 404 (never reveals whether it exists for someone else).
+    @app.exception_handler(NotFoundError)
+    async def not_found_handler(_: Request, exc: NotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc), "code": "not_found"})
+
+    # State conflicts and stale approvals: 409.
+    @app.exception_handler(ConflictError)
+    @app.exception_handler(ApprovalError)
+    async def conflict_handler(_: Request, exc: ConflictError | ApprovalError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc), "code": exc.category})

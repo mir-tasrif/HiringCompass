@@ -5,8 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Placeholder values that must never be used in production.
@@ -50,6 +51,22 @@ class Settings(BaseSettings):
     max_pdf_pages: int = Field(default=15, ge=1)
     allowed_upload_types: str = "application/pdf"
 
+    # --- Company (used in job descriptions and postings) ---
+    company_name: str = "Chorolin IT LTD"
+    google_form_link: str = ""
+    discord_webhook_url: str = ""
+    discord_channel_name: str = "#job-circulars"
+
+    @field_validator("google_form_link")
+    @classmethod
+    def _validate_google_form_link(cls, value: str) -> str:
+        value = value.strip()
+        if value:
+            parsed = urlsplit(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("GOOGLE_FORM_LINK must be an absolute HTTP(S) URL")
+        return value
+    
     # --- Auth ---
     jwt_secret: str = "change_me_to_a_long_random_string"
     jwt_algorithm: str = "HS256"

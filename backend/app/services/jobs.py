@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import PermanentError
@@ -71,7 +71,10 @@ async def activate_version(session: AsyncSession, job_id: uuid.UUID, version: in
     for previous in (await session.scalars(select(JobVersion).where(JobVersion.job_id == job_id, JobVersion.status == "active"))):
         previous.status = "superseded"
     row.status = "active"
-    job = await session.get(Job, job_id)
+    job = await session.get(Job, job_id, with_for_update=True)
+    if job.public_code is None:
+        next_code = await session.scalar(text("SELECT nextval('job_code_seq')"))
+        job.public_code = f"JD{next_code:03d}"
     job.active_version = version
     await session.commit()
 

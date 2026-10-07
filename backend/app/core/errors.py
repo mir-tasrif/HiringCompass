@@ -58,3 +58,14 @@ class AuthError(PermanentError):
 # Authenticated, but the role may not do this (HTTP 403).
 class ForbiddenError(PermanentError):
     category = "forbidden"
+
+
+
+# The requested resource does not exist or is not visible to this user (HTTP 404).
+class NotFoundError(PermanentError):
+    category = "not_found"
+
+
+# The request conflicts with the current state, e.g. the assistant is still busy (HTTP 409).
+class ConflictError(PermanentError):
+    category = "conflict"

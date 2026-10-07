@@ -26,7 +26,7 @@ class ScriptedLLM:
 
     # Return the next scripted reply for the requested schema.
     async def chat(self, messages: list[dict[str, str]], *, schema: dict[str, Any] | None = None, **_: Any) -> str:
-        name = schema["title"]
+        name = schema["title"] if schema else "ConversationReply"
         self.calls.append((name, messages))
         queue = self.script[name]
         return queue.pop(0) if len(queue) > 1 else queue[0]
