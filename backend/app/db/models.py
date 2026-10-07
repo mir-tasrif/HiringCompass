@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
@@ -28,10 +28,13 @@ class User(Base, IdMixin, TimestampMixin):
 # A hiring job owned by an interviewer; points at its active version.
 class Job(Base, IdMixin, TimestampMixin):
     __tablename__ = "jobs"
+    __table_args__ = (UniqueConstraint("public_code", name="uq_jobs_public_code"),)
 
     title: Mapped[str] = mapped_column(String(200))
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     active_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    public_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    next_candidate_number: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
 
 
 # Immutable job profile + rubric snapshot; edits create a new version.
@@ -44,6 +47,19 @@ class JobVersion(Base, IdMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="draft", server_default="draft")
     profile: Mapped[dict[str, Any]] = mapped_column(JSONB)
     rubric: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+# Delivery record for an approved job version on an external hiring platform.
+class JobPosting(Base, IdMixin, TimestampMixin):
+    __tablename__ = "job_postings"
+    __table_args__ = (UniqueConstraint("job_id", "version", "platform", name="uq_job_postings_job_version_platform"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    platform: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # Person who applied; holds the only contact data (deleted on request, N19).
@@ -60,12 +76,34 @@ class Application(Base, IdMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("candidate_id", "job_id", name="uq_applications_candidate_job"),
         Index("ix_applications_job_stage", "job_id", "stage"),
+        UniqueConstraint("job_id", "candidate_number", name="uq_applications_job_candidate_number"),
     )
 
     candidate_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"))
     job_version: Mapped[int] = mapped_column(Integer)
+    candidate_number: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     stage: Mapped[str] = mapped_column(String(40), default="uploaded", server_default="uploaded")
+    source: Mapped[str] = mapped_column(String(40), default="manual", server_default="manual")
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rejected_from_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    rejection_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+# Append-only stage and rejection history for each application.
+class ApplicationEvent(Base, IdMixin):
+    __tablename__ = "application_events"
+    __table_args__ = (Index("ix_application_events_application_created", "application_id", "created_at"),)
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    action: Mapped[str] = mapped_column(String(20))
+    from_stage: Mapped[str] = mapped_column(String(40))
+    to_stage: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # Stored CV file metadata; replacement creates a new version.
@@ -79,6 +117,7 @@ class Document(Base, IdMixin, TimestampMixin):
     application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     file_path: Mapped[str] = mapped_column(String(500))
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(30), default="stored", server_default="stored")
@@ -167,3 +206,31 @@ class KnowledgeChunk(Base, IdMixin, TimestampMixin):
     chunk_index: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[Any] = mapped_column(Vector(768))
+
+
+
+
+# One assistant conversation owned by an interviewer; tracks the linked job and the current LangGraph run.
+class ChatThread(Base, IdMixin, TimestampMixin):
+    __tablename__ = "chat_threads"
+    __table_args__ = (Index("ix_chat_threads_owner_updated", "owner_id", "updated_at"),)
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(200), default="New job chat", server_default="New job chat")
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    state: Mapped[str] = mapped_column(String(30), default="interviewing", server_default="interviewing")
+    status: Mapped[str] = mapped_column(String(20), default="idle", server_default="idle")
+    run_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    active_run: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+# One message in a thread; `payload` carries structured content (question options, draft card, ...).
+class ChatMessage(Base, IdMixin):
+    __tablename__ = "chat_messages"
+    __table_args__ = (Index("ix_chat_messages_thread_created", "thread_id", "created_at"),)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("clock_timestamp()"))
+    thread_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chat_threads.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

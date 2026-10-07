@@ -21,7 +21,7 @@ from app.schemas.contracts import WorkKind
 def build_job_graph(checkpointer: Any, deps: JobGraphDeps):
     nodes = make_nodes(deps)
     retry = RetryPolicy(max_attempts=3, initial_interval=deps.retry_interval, backoff_factor=2.0, jitter=False, retry_on=TransientError)
-    llm_nodes = {"extract_criteria", "retrieve_policy", "generate_profile", "generate_rubric"}
+    llm_nodes = {"extract_criteria", "ask_clarification", "retrieve_policy", "generate_profile", "generate_rubric"}
 
     g = StateGraph(JobIntelState)
     for name, fn in nodes.items():
@@ -39,7 +39,8 @@ def build_job_graph(checkpointer: Any, deps: JobGraphDeps):
     g.add_conditional_edges("save_draft", ok_or_end("await_activation"))
     g.add_conditional_edges("await_activation", route_after_gate)
     g.add_conditional_edges("activate_version", ok_or_end("prepare_posting_text"))
-    g.add_edge("prepare_posting_text", END)
+    g.add_edge("prepare_posting_text", "index_for_rag")
+    g.add_edge("index_for_rag", END)
     g.add_edge("prepare_edit", "generate_profile")
     g.add_edge("mark_discarded", END)
     return g.compile(checkpointer=checkpointer)

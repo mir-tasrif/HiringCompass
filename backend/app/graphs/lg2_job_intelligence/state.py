@@ -15,6 +15,9 @@ class JobIntelState(RunMeta, total=False):
     criteria: dict[str, Any]
     criteria_sufficient: bool
     clarification_question: str | None
+    clarification_options: list[str]
+    clarification_field: str | None
+    force_proceed: bool
     policy_passages: list[dict[str, Any]]
     job_profile: dict[str, Any] | None
     rubric: dict[str, Any] | None
@@ -24,5 +27,6 @@ class JobIntelState(RunMeta, total=False):
     approval_id: str | None
     decision: Literal["approve", "edit", "reject"] | None
     posting_text: str | None
+    jd_indexed: bool
     active_version: int | None
     status: str

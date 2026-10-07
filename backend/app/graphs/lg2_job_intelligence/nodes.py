@@ -8,18 +8,21 @@ from typing import Any, Callable
 from langgraph.types import interrupt
 from pydantic import ValidationError
 
-from app.core.errors import PermanentError
+from app.core.errors import PermanentError, StructuredOutputError
+from app.core.logging import get_logger, log_exception
 from app.graphs.common.handoff import to_state
 from app.graphs.common.node_guard import guarded_node
 from app.graphs.lg2_job_intelligence import prompts
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
-from app.graphs.lg2_job_intelligence.drafts import ExtractedCriteria, JobProfileDraft, RubricDraft
+from app.graphs.lg2_job_intelligence.drafts import ClarifyingQuestion, ExtractedCriteria, JobProfileDraft, RubricDraft
 from app.graphs.lg2_job_intelligence.posting import build_posting_text
 from app.llm.structured import generate_structured
+from app.rag.ingest import ingest_directory
 from app.schemas.contracts import ApprovalGate, EvaluationRubric, JobProfile, Requirement, RubricDimension
 from app.services import approvals, jobs
 from app.services.fairness import find_protected_terms
 
+logger = get_logger("graph.lg2")
 _OPTIONS = ["approve", "edit", "reject"]
 
 
@@ -38,6 +41,20 @@ def _describe(exc: ValidationError) -> list[str]:
     return [f"{'.'.join(str(p) for p in e['loc']) or 'draft'}: {e['msg'].removeprefix('Value error, ')}" for e in exc.errors()]
 
 
+# What the interview still needs to learn, in plain words (merged with the model's own list).
+def _missing_items(criteria: ExtractedCriteria) -> list[str]:
+    items = list(criteria.missing_info)
+    if not criteria.title.strip():
+        items.append("the role title")
+    if len(criteria.requirements) < 2:
+        items.append("the key required skills")
+    if not criteria.experience:
+        items.append("the experience needed")
+    if not criteria.education:
+        items.append("the education required")
+    return list(dict.fromkeys(items))
+
+
 # Build the LG2 nodes bound to their dependencies.
 def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
     namespace = deps.settings.rag_namespace_company
@@ -52,34 +69,63 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
             version = state.get("draft_version") or await jobs.next_version(session, job_id)
         return {"draft_version": version, "retry_count": 0, "validation_errors": [], "status": "drafting"}
 
-    # Turn the recruiter prompt into structured criteria and decide whether they are sufficient.
+    # Turn the conversation into structured criteria and decide, by fixed rules, whether they are sufficient.
+    # `force_proceed` (set after too many questions) accepts a title and one requirement.
     @guarded_node("extract_criteria")
     async def extract_criteria(state: dict[str, Any]) -> dict[str, Any]:
         criteria = await generate_structured(deps.llm, ExtractedCriteria, system=prompts.EXTRACT_SYSTEM, user=state["recruiter_prompt"])
-        sufficient = criteria.sufficient and bool(criteria.title.strip()) and len(criteria.requirements) >= 2
-        missing = criteria.missing_info or ["the role title and at least two requirements"]
-        question = None if sufficient else "I need a bit more detail before drafting: " + "; ".join(missing) + "."
-        return {"criteria": criteria.model_dump(mode="json"), "criteria_sufficient": sufficient, "clarification_question": question}
+        if state.get("force_proceed"):
+            sufficient = bool(criteria.title.strip()) and len(criteria.requirements) >= 1
+        else:
+            sufficient = bool(criteria.title.strip()) and len(criteria.requirements) >= 2 and bool(criteria.experience) and bool(criteria.education)
+        question = None if sufficient else "I need a bit more detail before drafting: " + "; ".join(_missing_items(criteria)) + "."
+        return {"criteria": criteria.model_dump(mode="json"), "criteria_sufficient": sufficient, "clarification_question": question,
+                "clarification_options": [], "clarification_field": None}
 
-    # Stop the run and hand the question back to the recruiter.
+
+   
+    # Ask ONE follow-up question with clickable options; falls back to the plain question if the model fails.
     @guarded_node("ask_clarification")
     async def ask_clarification(state: dict[str, Any]) -> dict[str, Any]:
-        return {"status": "awaiting_recruiter"}
+        criteria = ExtractedCriteria(**state["criteria"])
+        try:
+            asked = await generate_structured(
+                deps.llm, ClarifyingQuestion, system=prompts.CLARIFY_SYSTEM,
+                user=prompts.clarify_prompt(state["criteria"], _missing_items(criteria), state["recruiter_prompt"]))
+        except StructuredOutputError:
+            return {"status": "awaiting_recruiter"}
+        options = [o.strip() for o in asked.options if o.strip()][:5]
+        return {"clarification_question": asked.question, "clarification_options": options, "clarification_field": asked.field,
+                "status": "awaiting_recruiter"}
+    
 
-    # Retrieve relevant company hiring-policy passages (empty when no corpus is ingested).
+    # Retrieve company knowledge: role-relevant policy and previous job descriptions, plus general company information.
     @guarded_node("retrieve_policy")
     async def retrieve_policy(state: dict[str, Any]) -> dict[str, Any]:
+        corpus = deps.settings.rag_corpus_dir / "company"
+        if corpus.is_dir():
+            await ingest_directory("company", corpus, settings=deps.settings, store=deps.store,
+                                   session_factory=deps.session_factory)
         criteria = ExtractedCriteria(**state["criteria"])
-        query = criteria.title + ". " + "; ".join(r.text for r in criteria.requirements[:5])
+        role_query = criteria.title + ". " + "; ".join(r.text for r in criteria.requirements[:5])
+        info_query = f"{deps.settings.company_name} company overview about us mission culture benefits"
         async with deps.session_factory() as session:
-            hits = await deps.store.search(session, namespace=namespace, query=query, top_k=3)
-        passages = [{"chunk_id": str(h.chunk_id), "title": h.title, "version": h.version, "content": h.content} for h in hits]
+            hits = await deps.store.search(session, namespace=namespace, query=role_query, top_k=4)
+            hits += await deps.store.search(session, namespace=namespace, query=info_query, top_k=2)
+        passages, seen = [], set()
+        for h in hits:
+            if h.chunk_id in seen:
+                continue
+            seen.add(h.chunk_id)
+            kind = "previous_jd" if (h.source_uri or "").startswith("job:") else "company"
+            passages.append({"chunk_id": str(h.chunk_id), "title": h.title, "version": h.version, "content": h.content, "kind": kind})
         return {"policy_passages": passages}
 
     # Draft the job profile (uses recruiter feedback and earlier validation errors when present).
     @guarded_node("generate_profile")
     async def generate_profile(state: dict[str, Any]) -> dict[str, Any]:
-        user = prompts.profile_prompt(state["criteria"], state.get("policy_passages", []), state.get("feedback"), state.get("validation_errors", []))
+        user = prompts.profile_prompt(state["criteria"], state.get("policy_passages", []), state.get("feedback"),
+                                      state.get("validation_errors", []), deps.settings.company_name)
         draft = await generate_structured(deps.llm, JobProfileDraft, system=prompts.PROFILE_SYSTEM, user=user)
         return {"job_profile": draft.model_dump(mode="json")}
 
@@ -100,7 +146,8 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
         try:
             profile = JobProfile(
                 job_id=job_id, version=version, title=draft["title"], summary=draft["summary"],
-                responsibilities=draft.get("responsibilities", []),
+                responsibilities=draft.get("responsibilities", []), employment_type=draft.get("employment_type"),
+                location=draft.get("location"), about_company=draft.get("about_company"), benefits=draft.get("benefits", []),
                 requirements=[Requirement(requirement_id=f"R{i}", **r) for i, r in enumerate(draft["requirements"], start=1)],
                 policy_source_ids=[p["chunk_id"] for p in state.get("policy_passages", [])],
             )
@@ -114,7 +161,7 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
             texts = [r.text.strip().lower() for r in profile.requirements]
             if len(set(texts)) != len(texts):
                 errors.append("requirements: duplicate requirements found")
-            checked = [profile.summary, *profile.responsibilities, *(r.text for r in profile.requirements)]
+            checked = [profile.summary, profile.about_company or "", *profile.responsibilities, *profile.benefits, *(r.text for r in profile.requirements)]
             if rubric:
                 checked += [d.description for d in rubric.dimensions] + [a for d in rubric.dimensions for a in d.anchors.values()]
             for term in find_protected_terms(" ".join(checked)):
@@ -165,10 +212,24 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
     # Create copyable posting text for manual posting and store it with the version.
     @guarded_node("prepare_posting_text")
     async def prepare_posting_text(state: dict[str, Any]) -> dict[str, Any]:
-        text = build_posting_text(state["job_profile"])
+        text = build_posting_text(state["job_profile"], deps.settings.company_name, deps.settings.google_form_link)
         async with deps.session_factory() as session:
             await jobs.set_posting_text(session, uuid.UUID(state["job_id"]), state["draft_version"], text)
         return {"posting_text": text}
+
+    # Add the approved JD to the company knowledge base so future drafts can reuse its style (best effort: never blocks approval).
+    @guarded_node("index_for_rag")
+    async def index_for_rag(state: dict[str, Any]) -> dict[str, Any]:
+        profile, version = state["job_profile"], state["draft_version"]
+        try:
+            async with deps.session_factory() as session:
+                await deps.store.ingest_document(
+                    session, namespace=namespace, title=f"Job description: {profile['title']} v{version}", text=state["posting_text"],
+                    source_uri=f"job:{state['job_id']}:v{version}", version=f"v{version}")
+            return {"jd_indexed": True}
+        except Exception as exc:
+            log_exception(logger, "approved job description could not be indexed", exc)
+            return {"jd_indexed": False}
 
     # Edit requested: retire this draft and start the next version with the recruiter's feedback.
     @guarded_node("prepare_edit")
@@ -185,5 +246,5 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
         return {"status": "discarded"}
 
     return {f.__name__: f for f in (load_inputs, extract_criteria, ask_clarification, retrieve_policy, generate_profile, generate_rubric,
-                                     validate_draft, fail_draft, save_draft, await_activation, activate_version, prepare_posting_text,
+                                     validate_draft, fail_draft, save_draft, await_activation, activate_version, prepare_posting_text,index_for_rag,
                                      prepare_edit, mark_discarded)}

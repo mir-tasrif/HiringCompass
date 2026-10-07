@@ -9,20 +9,22 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+import pymupdf
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import app.graphs.orchestrator as orch
 from app.core.config import Settings
-from app.core.errors import ApprovalError
-from app.db.models import Approval, User
+from app.core.errors import ApprovalError, TransientError
+from app.db.models import Approval, Job, KnowledgeSource, User
 from app.graphs.common.checkpointer import open_checkpointer
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.graph import register_job_graph
 from app.graphs.lg2_job_intelligence.nodes import normalize_weights
 from app.graphs.orchestrator import GraphRegistry, resume_graph, run_graph, run_status
 from app.rag.store import KnowledgeStore
+from app.rag.ingest import ingest_directory
 from app.schemas.contracts import ApprovalGate, RubricDimension, WorkKind
 from app.services import approvals, jobs
 from tests.helpers import ScriptedLLM, fake_embed
@@ -36,7 +38,8 @@ REQS = [
     {"text": "Docker experience", "kind": "preferred", "weight": 1},
 ]
 CRITERIA = {"title": "Backend Python Engineer", "summary": "Builds APIs", "responsibilities": ["Build REST APIs"],
-            "requirements": REQS, "priorities": "skills matter most", "missing_info": [], "sufficient": True}
+            "requirements": REQS, "priorities": "skills matter most", "experience": "3+ years", "education": "B.Sc in Computer Science",
+            "missing_info": [], "sufficient": True}
 PROFILE = {"title": "Backend Python Engineer", "summary": "Builds and runs our APIs.", "responsibilities": ["Build REST APIs"], "requirements": REQS}
 ANCHORS = {"0": "no evidence", "50": "partial evidence", "100": "strong evidence"}
 
@@ -64,7 +67,7 @@ def _require_db():
 @pytest.fixture
 def settings(tmp_path):
     return Settings(log_dir=tmp_path / "l", error_dir=tmp_path / "e", file_storage_dir=tmp_path / "s",
-                    export_dir=tmp_path / "s/e", quarantine_dir=tmp_path / "s/q")
+                    export_dir=tmp_path / "s/e", quarantine_dir=tmp_path / "s/q", rag_corpus_dir=tmp_path / "corpora")
 
 
 # Create user + job (+ optional policy document), register LG2, and clean everything up afterwards.
@@ -86,11 +89,14 @@ async def environment(settings, script, ingest_policy=False):
     orch.registry = GraphRegistry()
     register_job_graph(orch.registry, JobGraphDeps(llm=llm, store=store, session_factory=factory, settings=settings, retry_interval=0.01))
     try:
-        yield SimpleNamespace(job=job, llm=llm, factory=factory, thread=f"job-{job.id}")
+        yield SimpleNamespace(job=job, llm=llm, store=store, factory=factory, thread=f"job-{job.id}")
     finally:
         async with factory() as s:
-            await s.execute(delete(Approval).where(Approval.job_id == job.id))
-            await s.delete(await jobs.get_job(s, job.id))
+            owned = list(await s.scalars(select(Job.id).where(Job.owner_id == user.id)))
+            await s.execute(delete(Approval).where(Approval.job_id.in_(owned)))
+            for job_id in owned:
+                await s.execute(delete(KnowledgeSource).where(KnowledgeSource.source_uri.like(f"job:{job_id}:%")))
+            await s.execute(delete(Job).where(Job.owner_id == user.id))
             await s.delete(await s.get(User, user.id))
             await s.commit()
             if source_id:
@@ -147,7 +153,9 @@ def test_draft_gate_restart_activate(settings):
 
 # Insufficient criteria: the run ends by asking the recruiter, and nothing is drafted or saved.
 def test_needs_clarification(settings):
-    script = {"ExtractedCriteria": [json.dumps({"title": "", "requirements": [], "missing_info": ["required skills"], "sufficient": False})]}
+    asked = {"field": "skills", "question": "Which skills are required?", "options": ["Python", "Java", "Both"]}
+    script = {"ExtractedCriteria": [json.dumps({"title": "", "requirements": [], "missing_info": ["required skills"], "sufficient": False})],
+              "ClarifyingQuestion": [json.dumps(asked)]}
 
     # Whole scenario in one event loop.
     async def scenario():
@@ -155,7 +163,8 @@ def test_needs_clarification(settings):
             async with open_checkpointer(CHK_URL) as cp:
                 await start(env, cp, prompt="We need someone good.")
                 state = await values(env, cp)
-                assert state["status"] == "awaiting_recruiter" and "required skills" in state["clarification_question"]
+                assert state["status"] == "awaiting_recruiter" and state["clarification_question"] == "Which skills are required?"
+                assert state["clarification_options"] == ["Python", "Java", "Both"] and state["clarification_field"] == "skills"
                 assert await status(env, cp) == "finished" and not env.llm.calls_for("JobProfileDraft")
             async with env.factory() as s:
                 assert await jobs.get_version(s, env.job.id, 1) is None
@@ -273,3 +282,113 @@ def test_normalize_weights():
     out = normalize_weights(dims)
     assert abs(sum(d.weight for d in out) - 1) < 1e-9 and out[0].weight > out[1].weight > out[3].weight > out[2].weight
     assert abs(sum(d.weight for d in normalize_weights([d.model_copy(update={"weight": 0.5}) for d in dims])) - 1) < 1e-9
+
+
+
+
+# Approval indexes the JD into the company knowledge base; a later job sees it as a previous JD (style reference).
+def test_approved_jd_is_indexed_and_reused(settings):
+    unique = {**GOOD, "JobProfileDraft": [json.dumps({**PROFILE, "summary": f"Builds and runs our APIs {uuid.uuid4().hex}."})]}
+
+    # Whole scenario in one event loop (unique JD text, so identical leftovers can never be deduplicated against).
+    async def scenario():
+        async with environment(settings, unique) as env:
+            async with open_checkpointer(CHK_URL) as cp:
+                await start(env, cp)
+                final = await decide_and_resume(env, cp, "approve")
+                assert final["jd_indexed"] is True
+            async with env.factory() as s:
+                found = list(await s.scalars(select(KnowledgeSource).where(KnowledgeSource.source_uri == f"job:{env.job.id}:v1")))
+                assert len(found) == 1 and found[0].title == "Job description: Backend Python Engineer v1"
+                second = await jobs.create_job(s, env.job.owner_id, "Another role")
+            async with open_checkpointer(CHK_URL) as cp:
+                await run_graph(WorkKind.JOB_DRAFT, thread_id=f"job-{second.id}", run_id=str(uuid.uuid4()), checkpointer=cp,
+                                input_state={"job_id": str(second.id), "recruiter_prompt": "Backend Python engineer with PostgreSQL"})
+            prompt = env.llm.calls_for("JobProfileDraft")[-1][1]["content"]
+            assert '<untrusted source="previous_job_descriptions">' in prompt and "[Job description: Backend Python Engineer v1]" in prompt
+            assert "The hiring company is Chorolin IT LTD." in prompt
+
+    asyncio.run(scenario())
+
+
+# Company documents are passed as untrusted company_policy and general company info is always requested.
+def test_company_documents_reach_the_prompt(settings):
+    # Whole scenario in one event loop.
+    async def scenario():
+        async with environment(settings, GOOD) as env:
+            async with env.factory() as s:
+                about, _ = await env.store.ingest_document(
+                    s, namespace=settings.rag_namespace_company, title="Company overview",
+                    text=f"{uuid.uuid4().hex} Chorolin IT LTD is a software company. Culture: small teams and code review.")
+            try:
+                async with open_checkpointer(CHK_URL) as cp:
+                    await start(env, cp)
+                    state = await values(env, cp)
+                prompt = env.llm.calls_for("JobProfileDraft")[0][1]["content"]
+                assert any(p["title"] == "Company overview" and p["kind"] == "company" for p in state["policy_passages"])
+                assert '<untrusted source="company_policy">' in prompt and "[Company overview]" in prompt
+            finally:
+                async with env.factory() as s:
+                    await env.store.delete_source(s, about)
+
+    asyncio.run(scenario())
+
+
+# If indexing fails (e.g. embedding service down), the approval still succeeds and the failure is reported in state.
+def test_index_failure_does_not_block_approval(settings):
+    # Whole scenario in one event loop.
+    async def scenario():
+        async with environment(settings, GOOD) as env:
+            # Simulate an embedding outage at indexing time.
+            async def broken(*args, **kwargs):
+                raise TransientError("embedding service down")
+
+            env.store.ingest_document = broken
+            async with open_checkpointer(CHK_URL) as cp:
+                await start(env, cp)
+                final = await decide_and_resume(env, cp, "approve")
+            assert final["active_version"] == 1 and final["jd_indexed"] is False and not final.get("error")
+
+    asyncio.run(scenario())
+
+
+# The job-relevance check also covers benefits and the company description.
+def test_fairness_covers_benefits(settings):
+    biased = {**PROFILE, "benefits": ["Housing allowance for married employees"]}
+    script = {**GOOD, "JobProfileDraft": [json.dumps(biased)]}
+
+    # Whole scenario in one event loop.
+    async def scenario():
+        async with environment(settings, script) as env:
+            async with open_checkpointer(CHK_URL) as cp:
+                result = await start(env, cp)
+                assert result["error_category"] == "draft_invalid" and "'married'" in " ".join(result["validation_errors"])
+
+    asyncio.run(scenario())
+
+
+def test_company_pdf_is_automatically_available_to_job_drafting(settings):
+    corpus = settings.rag_corpus_dir / "company"
+    corpus.mkdir(parents=True)
+    filename = f"company_information_{uuid.uuid4().hex}.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page().insert_text((72, 72), f"Chorolin IT LTD develops Python APIs and PostgreSQL software. {uuid.uuid4().hex}")
+        doc.save(corpus / filename)
+    (corpus / "broken.pdf").write_bytes(b"%PDF-1.4 broken")
+
+    async def scenario():
+        async with environment(settings, GOOD) as env:
+            try:
+                async with open_checkpointer(CHK_URL) as cp:
+                    await start(env, cp)
+                    assert await status(env, cp) == "waiting_human"
+                prompt = env.llm.calls_for("JobProfileDraft")[0][1]["content"]
+                assert "company information" in prompt and "[Page 1]" in prompt and "PostgreSQL software" in prompt
+                assert await ingest_directory("company", corpus, settings=settings, store=env.store,
+                                              session_factory=env.factory) == (2, 0, 1)
+            finally:
+                async with env.factory() as s:
+                    source = await s.scalar(select(KnowledgeSource).where(KnowledgeSource.source_uri == f"file:{filename}"))
+                    if source:
+                        await env.store.delete_source(s, source.id)
+    asyncio.run(scenario())

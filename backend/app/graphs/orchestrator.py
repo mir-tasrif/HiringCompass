@@ -85,3 +85,11 @@ async def run_status(kind: WorkKind, *, thread_id: str, checkpointer: Any) -> st
     if any(task.interrupts for task in snapshot.tasks):
         return "waiting_human"
     return "resumable"
+
+
+
+
+# Latest saved state values of a run (what the graph has produced so far, including while it waits).
+async def run_values(kind: WorkKind, *, thread_id: str, checkpointer: Any) -> dict[str, Any]:
+    snapshot = await registry.get(kind, checkpointer).aget_state({"configurable": {"thread_id": thread_id}})
+    return dict(snapshot.values)

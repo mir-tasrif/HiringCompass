@@ -195,6 +195,10 @@ class JobProfile(Contract):
     responsibilities: list[str] = Field(default_factory=list)
     requirements: list[Requirement]
     policy_source_ids: list[str] = Field(default_factory=list)
+    employment_type: str | None = None
+    location: str | None = None
+    about_company: str | None = None
+    benefits: list[str] = Field(default_factory=list)
     posting_text: str | None = None
     active: bool = False
 
