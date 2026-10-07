@@ -42,6 +42,11 @@ services:
       LOG_DIR: /app/logs
       ERROR_DIR: /app/errors
       WORKER_ID: api
+    volumes:
+      - hc_logs:/app/logs
+      - hc_errors:/app/errors
+      - hc_files:/app/storage
+      - ./backend/app/rag/corpora:/app/app/rag/corpora
     ports:
       - "8000:8000"
 

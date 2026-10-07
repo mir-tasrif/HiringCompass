@@ -1,12 +1,15 @@
-```
 HiringCompass
 ├─ .dockerignore
 ├─ backend
 │  ├─ alembic.ini
 │  ├─ app
 │  │  ├─ api
+│  │  │  ├─ deps.py
 │  │  │  ├─ errors.py
 │  │  │  ├─ routers
+│  │  │  │  ├─ auth.py
+│  │  │  │  ├─ chat.py
+│  │  │  │  └─ __init__.py
 │  │  │  └─ __init__.py
 │  │  ├─ approvals
 │  │  ├─ core
@@ -35,6 +38,15 @@ HiringCompass
 │  │  │  │  ├─ routing.py
 │  │  │  │  └─ state.py
 │  │  │  ├─ lg2_job_intelligence
+│  │  │  │  ├─ deps.py
+│  │  │  │  ├─ drafts.py
+│  │  │  │  ├─ graph.py
+│  │  │  │  ├─ nodes.py
+│  │  │  │  ├─ posting.py
+│  │  │  │  ├─ prompts.py
+│  │  │  │  ├─ routing.py
+│  │  │  │  ├─ state.py
+│  │  │  │  └─ __init__.py
 │  │  │  ├─ lg3_screening
 │  │  │  │  └─ f11_subgraph.py
 │  │  │  ├─ lg4_scoring
@@ -66,7 +78,13 @@ HiringCompass
 │  │  │  ├─ enums.py
 │  │  │  └─ __init__.py
 │  │  ├─ services
+│  │  │  ├─ approvals.py
+│  │  │  ├─ chat.py
+│  │  │  ├─ dispatch.py
+│  │  │  ├─ fairness.py
+│  │  │  ├─ jobs.py
 │  │  │  ├─ uploads.py
+│  │  │  ├─ users.py
 │  │  │  └─ __init__.py
 │  │  ├─ tools
 │  │  └─ worker
@@ -76,12 +94,17 @@ HiringCompass
 │  │  ├─ script.py.mako
 │  │  └─ versions
 │  │     ├─ 0001_base_schema.py
-│  │     └─ 0002_knowledge_base.py
+│  │     ├─ 0002_knowledge_base.py
+│  │     └─ 0003_chat.py
 │  ├─ pyproject.toml
 │  ├─ requirements.txt
 │  └─ tests
+│     ├─ helpers.py
+│     ├─ test_auth.py
+│     ├─ test_chat.py
 │     ├─ test_checkpoint_resume.py
 │     ├─ test_graph_skeleton.py
+│     ├─ test_lg2_job_intelligence.py
 │     ├─ test_llm_rag.py
 │     ├─ test_uploads.py
 │     └─ __init__.py
@@ -111,19 +134,31 @@ HiringCompass
 │  ├─ package.json
 │  ├─ src
 │  │  ├─ api
+│  │  │  ├─ chat.ts
 │  │  │  └─ client.ts
 │  │  ├─ App.tsx
+│  │  ├─ auth
+│  │  │  └─ AuthContext.tsx
 │  │  ├─ components
-│  │  │  └─ ChatDock
+│  │  │  ├─ ChatDock
+│  │  │  ├─ Layout.tsx
+│  │  │  └─ RequireAuth.tsx
 │  │  ├─ hooks
 │  │  │  └─ useHealth.ts
 │  │  ├─ main.tsx
 │  │  ├─ pages
+│  │  │  ├─ Assistant.tsx
+│  │  │  ├─ ComingSoon.tsx
+│  │  │  ├─ Dashboard.tsx
+│  │  │  └─ Login.tsx
 │  │  └─ styles.css
 │  ├─ tsconfig.json
 │  └─ vite.config.ts
 ├─ hiringcompass_state_schemas.py
 ├─ logs
+├─ package-lock.json
+├─ package.json
+├─ Project_tree.md
 ├─ README.md
 ├─ scripts
 ├─ setup_project.py
@@ -133,5 +168,3 @@ HiringCompass
    ├─ integration
    ├─ mock_runners
    └─ unit
-
-```
