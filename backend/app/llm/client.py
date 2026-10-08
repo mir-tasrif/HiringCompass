@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -33,18 +34,28 @@ class LLMClient:
         await self._embed_http.aclose()
 
     # Send a request under the concurrency limit and translate HTTP/network failures.
-    async def _request(self, http: httpx.AsyncClient, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _request(self, http: httpx.AsyncClient, method: str, path: str,
+                       payload: dict[str, Any] | None = None, *, service: str = "AI service") -> dict[str, Any]:
         try:
             async with self._slots:
                 response = await http.request(method, path, json=payload)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise TransientError("The AI service is unreachable or timed out.") from exc
+            raise TransientError(f"The {service} is unreachable or timed out.") from exc
         if response.status_code == 429 or response.status_code >= 500:
-            raise TransientError(f"The AI service is busy (HTTP {response.status_code}).")
+            raise TransientError(f"The {service} is busy (HTTP {response.status_code}).")
         if response.status_code in (401, 403):
             raise PermanentError("The AI service rejected the API key.")
         if response.status_code >= 400:
-            raise PermanentError(f"The AI service rejected the request (HTTP {response.status_code}).")
+            detail = ""
+            try:
+                body = response.json()
+                error = body.get("error", body) if isinstance(body, dict) else {}
+                detail = error.get("message", "") if isinstance(error, dict) else str(error)
+            except (ValueError, TypeError):
+                pass
+            detail = re.sub(r"\s+", " ", str(detail)).strip()[:400]
+            suffix = f": {detail}" if detail else "."
+            raise PermanentError(f"The {service} rejected the request (HTTP {response.status_code}){suffix}")
         return response.json()
 
     # Chat completion; `schema` (a JSON schema) constrains the reply to JSON of that shape.
@@ -65,7 +76,7 @@ class LLMClient:
                 instruction = "Reply only with one JSON object matching this JSON schema: " + json.dumps(schema)
                 payload["messages"] = [{"role": "system", "content": instruction}, *messages]
                 payload["response_format"] = {"type": "json_object"}
-        data = await self._request(self._chat_http, "POST", "/chat/completions", payload)
+        data = await self._request(self._chat_http, "POST", "/chat/completions", payload, service="configured chat AI service")
         content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
         if not content:
             raise TransientError("The AI service returned an empty reply.")
@@ -73,7 +84,9 @@ class LLMClient:
 
     # Embed a batch of texts with the local Ollama embedding model.
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        data = await self._request(self._embed_http, "POST", "/api/embed", {"model": self._settings.embedding_model, "input": texts})
+        data = await self._request(self._embed_http, "POST", "/api/embed",
+                                   {"model": self._settings.embedding_model, "input": texts},
+                                   service="local Ollama embedding service")
         return data["embeddings"]
 
     # Report the active profile and whether the chat and embedding models are available.
