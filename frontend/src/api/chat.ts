@@ -12,6 +12,8 @@ export type MessagePayload =
   | { type: "approved"; job_id: string; job_code?: string; version: number; jd_text: string | null; posting_available?: boolean; posting_platforms?: string[] }
   | { type: "posting_offer"; platforms: string[] }
   | { type: "posting_result"; platform: string; status: "posted" | "already_posted" | "failed"; version?: number; channel?: string }
+  | { type: "job_update"; jobs: { job_id: string; job_code: string | null; title: string; version: number; cv_submissions: number; cv_pipeline: { uploaded: number; integrity_check: number; integrity_review: number; parsed: number; ranking: number; f1_review: number; scoring: number; rejected: number }; posting_status: string; posting_configured: boolean; can_post: boolean; archived: boolean; postings: { platform: string; status: string }[] }[] }
+  | { type: "candidate_work"; route: string; job_id?: string; job_code?: string | null; kind?: "integrity" | "ranking" | "review"; batch_id?: string; awaiting_confirmation?: string | null; application_ids?: string[]; review_required?: boolean; evidence_summary?: string }
   | { type: "decision"; option: string }
   | { type: "error" };
 
