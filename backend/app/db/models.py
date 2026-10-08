@@ -28,13 +28,17 @@ class User(Base, IdMixin, TimestampMixin):
 # A hiring job owned by an interviewer; points at its active version.
 class Job(Base, IdMixin, TimestampMixin):
     __tablename__ = "jobs"
-    __table_args__ = (UniqueConstraint("public_code", name="uq_jobs_public_code"),)
+    __table_args__ = (
+        UniqueConstraint("public_code", name="uq_jobs_public_code"),
+        Index("ix_jobs_owner_archived", "owner_id", "archived_at"),
+    )
 
     title: Mapped[str] = mapped_column(String(200))
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     active_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     public_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     next_candidate_number: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 # Immutable job profile + rubric snapshot; edits create a new version.
@@ -90,6 +94,66 @@ class Application(Base, IdMixin, TimestampMixin):
     rejection_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rejected_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+# Durable recruiter-triggered batch for parsing/integrity or F1 ranking.
+class CvBatch(Base, IdMixin, TimestampMixin):
+    __tablename__ = "cv_batches"
+    __table_args__ = (Index("ix_cv_batches_owner_created", "owner_id", "created_at"),)
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_threads.id", ondelete="SET NULL"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
+    total: Mapped[int] = mapped_column(Integer)
+    completion_notified: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+
+
+# One independently retryable CV task in a batch.
+class CvBatchItem(Base, IdMixin, TimestampMixin):
+    __tablename__ = "cv_batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "application_id", name="uq_cv_batch_items_batch_application"),
+        Index("ix_cv_batch_items_status_created", "status", "created_at"),
+    )
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cv_batches.id", ondelete="CASCADE"))
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notified: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+
+
+# Parsed candidate evidence and explainable F11 signals; retained for recruiter review/audit.
+class CandidateProfile(Base, IdMixin, TimestampMixin):
+    __tablename__ = "candidate_profiles"
+    __table_args__ = (UniqueConstraint("application_id", name="uq_candidate_profiles_application"),)
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    extracted_text: Mapped[str] = mapped_column(Text)
+    extraction_method: Mapped[str] = mapped_column(String(20))
+    profile: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    integrity_verdict: Mapped[str] = mapped_column(String(30))
+    integrity_signals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    integrity_policy_version: Mapped[str] = mapped_column(String(40))
+
+
+# F1 evidence-based requirement match and per-job ranking result.
+class CandidateScreening(Base, IdMixin, TimestampMixin):
+    __tablename__ = "candidate_screenings"
+    __table_args__ = (UniqueConstraint("application_id", name="uq_candidate_screenings_application"),)
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    job_version: Mapped[int] = mapped_column(Integer)
+    suitability_score: Mapped[int] = mapped_column(Integer)
+    mandatory_pass: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    requirements: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    explanation: Mapped[str] = mapped_column(Text)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 # Append-only stage and rejection history for each application.
