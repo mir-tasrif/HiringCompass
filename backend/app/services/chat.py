@@ -11,12 +11,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from app.db.models import Application, ApplicationEvent, Approval, ChatMessage, ChatThread, CvBatch, CvBatchItem, Job, JobPosting
 
 from app.core.errors import AppError, ApprovalError, ConflictError, NotFoundError
 from app.core.logging import get_logger, log_exception
-from app.db.models import Approval, ChatMessage, ChatThread, JobPosting
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.posting import build_posting_text
 from app.graphs.orchestrator import resume_graph, run_graph, run_status, run_values
@@ -24,6 +24,7 @@ from app.schemas.contracts import ApprovalGate, WorkKind
 from app.llm.structured import generate_structured, wrap_untrusted
 from app.services import approvals, jobs
 from app.services.postings import post_to_discord
+
 
 logger = get_logger("services.chat")
 
@@ -61,6 +62,17 @@ def _explicit_job_request(message: str) -> bool:
     if re.search(r"\b(?:create|draft|write|generate|prepare|make)\s+(?:me\s+)?(?:a\s+|an\s+|the\s+)?(?:new\s+)?(?:job description|job posting|jd)\b", text):
         return True
     return bool(re.search(r"\b(?:role|position|job title)\s*:\s*[^\n]{3,}", text))
+
+
+def _is_job_status_question(message: str) -> bool:
+    text = message.strip().lower().replace("’", "'")
+    return bool(re.search(
+        r"\b(?:what(?:'s| is)\s+(?:the\s+)?(?:updates?|status|progress)|"
+        r"(?:give|show|tell)\s+me\s+(?:the\s+)?(?:job\s+)?(?:updates?|status)|"
+        r"how many\s+(?:cvs|resumes|applications)|"
+        r"(?:statuses|status|updates?|progress)\s+(?:of|for)\s+(?:the\s+)?jobs?)\b",
+        text,
+    ))
 
 
 # Everything a background turn needs: graph dependencies, the durable checkpointer, and a session factory.
@@ -203,6 +215,20 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         if thread.state == "awaiting_decision":
             return await _decide(session, runtime, thread, "approve", None)
         return "There is no draft ready to approve yet. Ask me to create a job description first.", {"type": "text"}
+    if _is_job_status_question(last_user.content):
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return await _job_update(session, runtime, thread)
+    confirmation = await _confirm_candidate_work(session, thread, messages, simple)
+    if confirmation is not None:
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return confirmation
+    cv_work = await _handle_candidate_work_request(session, thread, last_user.content)
+    if cv_work is not None:
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return cv_work
     previous_assistant = next((m for m in reversed(messages[:-1]) if m.role == "assistant"), None)
     if thread.state == "approved":
         was_offered = bool(previous_assistant and (
@@ -235,6 +261,12 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         intent = await generate_structured(runtime.deps.llm, TurnIntent, system=INTENT_SYSTEM,
                                            user=json.dumps({"job_state": thread.state, "job_title": thread.title, "messages": history}))
         action = intent.action
+    if thread.job_id and thread.state == "approved" and action != "conversation":
+        linked_job = await session.scalar(select(Job).where(Job.id == thread.job_id, Job.owner_id == thread.owner_id))
+        if linked_job is not None and linked_job.archived_at is not None:
+            last_user.payload = {**(last_user.payload or {}), "job_details": False}
+            await session.commit()
+            return "This job is in Expired Jobs and its chat is read-only. Start a new job chat to create or work on an active job.", {"type": "text"}
     last_user.payload = {**(last_user.payload or {}), "job_details": action != "conversation"}
     await session.commit()
     if action == "conversation":
@@ -259,6 +291,197 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
     return await _interpret(session, runtime, thread, result)
 
 
+async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThread,
+                                         message: str) -> tuple[str, dict[str, Any]] | None:
+    """Allow explicit, label-based CV batches from chat; never infer a candidate selection."""
+    text = message.strip()
+    lowered = text.lower()
+    integrity_request = bool(re.search(r"\b(?:integrity|parse|parsing|extract(?:ion)?)\b", lowered) and
+                             re.search(r"\b(?:cv|cvs|resume|resumes|candidate|candidates)\b", lowered))
+    ranking_request = bool(re.search(r"\b(?:rank|ranking|screen|screening|feature\s*1|f1)\b", lowered) and
+                           re.search(r"\b(?:cv|cvs|resume|resumes|candidate|candidates)\b", lowered))
+    if not integrity_request and not ranking_request:
+        return None
+    labels = [int(number) for number in re.findall(r"\bcandidate\s*0*(\d{1,6})\b", lowered)]
+    job_code_match = re.search(r"\bjd\s*0*(\d{1,6})\b", lowered, re.I)
+    job = await jobs.get_job(session, thread.job_id) if thread.job_id else None
+    if job is not None and job.archived_at is not None and thread.state == "approved":
+        return "This chat is linked to an expired job and is read-only. Start a new job chat to process CVs for an active job.", {"type": "text"}
+    if job is not None and (job.active_version is None or job.archived_at is not None):
+        job = None
+    if job_code_match:
+        code = f"JD{int(job_code_match.group(1)):03d}"
+        explicit_job = await session.scalar(select(Job).where(Job.owner_id == thread.owner_id,
+            Job.public_code == code, Job.active_version.is_not(None), Job.archived_at.is_(None)))
+        if explicit_job is None:
+            return f"I couldn't find active job {code}. Check its job code and try again.", {"type": "text"}
+        if job is not None and job.id != explicit_job.id:
+            return "This chat is linked to a different job. Open that job's chat or select its CVs in Candidates.", {"type": "text"}
+        job = explicit_job
+    if job is None:
+        return ("Tell me the job code, such as JD101, and the candidate labels to process. You can also select up to 20 CVs in Candidates.",
+                {"type": "candidate_work", "route": "/candidates"})
+    if thread.state == "awaiting_decision":
+        return "Finish reviewing the current job-description draft first. Then I can start CV work for an approved job.", {"type": "text"}
+    if thread.job_id != job.id:
+        thread.job_id, thread.title, thread.state = job.id, job.title, "approved"
+    route = f"/candidates?jobId={job.id}&section={'uploaded' if integrity_request else 'parsed'}"
+    if not labels:
+        task = "integrity check and parsing" if integrity_request else "Feature 1 ranking"
+        return (f"I can start {task} after you identify the CVs. Name candidate labels such as candidate001, or select up to 20 CVs for {job.public_code} in Candidates.",
+                {"type": "candidate_work", "route": route, "job_id": str(job.id), "job_code": job.public_code,
+                 "kind": "integrity" if integrity_request else "ranking"})
+    if len(labels) > 20:
+        return "A batch can contain up to 20 CVs. Please name a smaller group or select them in Candidates.", {"type": "candidate_work", "route": route}
+    expected_stage = "uploaded" if integrity_request else "parsed"
+    applications = list(await session.scalars(select(Application).where(Application.job_id == job.id,
+        Application.candidate_number.in_(set(labels)), Application.stage == expected_stage).order_by(Application.candidate_number)))
+    found = {application.candidate_number for application in applications}
+    missing = sorted(set(labels) - found)
+    if missing:
+        missing_labels = ", ".join(f"candidate{number:03d}" for number in missing)
+        return (f"I couldn't start the batch because {missing_labels} is not in the {expected_stage.replace('_', ' ')} stage for {job.public_code}. Check the job and CV section.",
+                {"type": "candidate_work", "route": route})
+    kind = "integrity_parse" if integrity_request else "ranking"
+    batch = CvBatch(owner_id=thread.owner_id, job_id=job.id, thread_id=thread.id, kind=kind, status="queued", total=len(applications))
+    session.add(batch)
+    await session.flush()
+    for application in applications:
+        old_stage = application.stage
+        application.stage = "integrity_check" if integrity_request else "ranking"
+        session.add(CvBatchItem(batch_id=batch.id, application_id=application.id, status="queued"))
+        session.add(ApplicationEvent(application_id=application.id, actor_id=thread.owner_id,
+            action="batch_started", from_stage=old_stage, to_stage=application.stage,
+            reason=f"Recruiter started {('integrity check and parsing' if integrity_request else 'Feature 1 ranking')} from the job chat."))
+    await session.commit()
+    operation = "Integrity check and parsing" if integrity_request else "Feature 1 ranking"
+    return (f"{operation} has started for {len(applications)} CV(s) under {job.public_code}. Processing continues in the background; review any flagged results in Candidates.",
+            {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section={'integrity' if integrity_request else 'ranking'}",
+             "batch_id": str(batch.id), "job_id": str(job.id), "job_code": job.public_code, "kind": "integrity" if integrity_request else "ranking"})
+
+
+async def _confirm_candidate_work(session: AsyncSession, thread: ChatThread, messages: list[ChatMessage],
+                                  simple: str) -> tuple[str, dict[str, Any]] | None:
+    """Continue the exact parsed-CV selection from a prior assistant offer after explicit recruiter confirmation."""
+    affirmative = simple in {"yes", "yes please", "sure", "go ahead", "proceed", "please proceed", "start it", "start ranking"}
+    if not affirmative:
+        return None
+    previous = next((message for message in reversed(messages[:-1]) if message.role == "assistant"), None)
+    payload = (previous.payload or {}) if previous else {}
+    if payload.get("type") != "candidate_work" or payload.get("awaiting_confirmation") != "ranking":
+        return None
+    try:
+        application_ids = list(dict.fromkeys(uuid.UUID(value) for value in payload.get("application_ids", [])))
+    except (ValueError, TypeError, AttributeError):
+        return "I couldn't confirm that CV selection. Please select the parsed CVs in Candidates and try again.", {"type": "text"}
+    if not application_ids or len(application_ids) > 20:
+        return "There are no eligible parsed CVs in that batch. Select up to 20 parsed CVs in Candidates.", {"type": "text"}
+    job_id_value = payload.get("job_id")
+    job = None
+    try:
+        if job_id_value:
+            job = await session.scalar(select(Job).where(Job.id == uuid.UUID(job_id_value), Job.owner_id == thread.owner_id,
+                Job.active_version.is_not(None), Job.archived_at.is_(None)))
+    except (ValueError, TypeError):
+        job = None
+    if job is None or (thread.job_id is not None and thread.job_id != job.id):
+        return "That job is no longer active in this chat. Select parsed CVs from an active job in Candidates.", {"type": "text"}
+    applications = list(await session.scalars(select(Application).where(Application.id.in_(application_ids),
+        Application.job_id == job.id, Application.stage == "parsed").with_for_update()))
+    if len(applications) != len(application_ids):
+        return "The selected CVs have changed stage and cannot all be ranked. Review the Parsed CV section and select the current set.", {"type": "text"}
+    batch = CvBatch(owner_id=thread.owner_id, job_id=job.id, thread_id=thread.id, kind="ranking", status="queued", total=len(applications))
+    session.add(batch)
+    await session.flush()
+    for application in applications:
+        application.stage = "ranking"
+        session.add(CvBatchItem(batch_id=batch.id, application_id=application.id, status="queued"))
+        session.add(ApplicationEvent(application_id=application.id, actor_id=thread.owner_id, action="batch_started",
+            from_stage="parsed", to_stage="ranking", reason="Recruiter confirmed Feature 1 ranking in the job chat."))
+    await session.commit()
+    return (f"Feature 1 ranking started for {len(applications)} CV(s) under {job.public_code}. I’ll share the results and direct you to Review when the batch finishes.",
+            {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=ranking", "batch_id": str(batch.id),
+             "job_id": str(job.id), "job_code": job.public_code, "kind": "ranking"})
+
+async def _job_activity_context(
+    session: AsyncSession,
+    thread: ChatThread,
+    posting_configured: bool,
+) -> list[dict[str, Any]]:
+    linked_job = None
+    if thread.job_id:
+        linked_job = await session.scalar(
+            select(Job).where(Job.id == thread.job_id, Job.owner_id == thread.owner_id)
+        )
+
+    # New chats have a placeholder job record until an approved JD is created.
+    # Treat that placeholder as unlinked and summarize the recruiter's approved jobs.
+    if linked_job is not None and linked_job.active_version is not None:
+        selected_jobs = [linked_job]
+    else:
+        selected_jobs = list(await session.scalars(
+            select(Job)
+            .where(Job.owner_id == thread.owner_id, Job.active_version.is_not(None), Job.archived_at.is_(None))
+            .order_by(Job.created_at.desc())
+        ))
+
+    activity: list[dict[str, Any]] = []
+    for job in selected_jobs:
+        version = job.active_version
+        cv_count = await session.scalar(select(func.count(Application.id)).where(Application.job_id == job.id))
+        stage_counts = dict((stage, count) for stage, count in await session.execute(
+            select(Application.stage, func.count(Application.id)).where(Application.job_id == job.id).group_by(Application.stage)
+        ))
+        posting_rows = list(await session.execute(
+            select(JobPosting.platform, JobPosting.status)
+            .where(JobPosting.job_id == job.id, JobPosting.version == version)
+        ))
+
+        posting_status = next((status for platform, status in posting_rows if platform == "discord"), "not_posted")
+        activity.append({
+            "job_id": str(job.id),
+            "job_code": job.public_code,
+            "title": job.title,
+            "archived": job.archived_at is not None,
+            "version": version,
+            "cv_submissions": cv_count or 0,
+            "cv_pipeline": {
+                "uploaded": stage_counts.get("uploaded", 0),
+                "integrity_check": stage_counts.get("integrity_check", 0),
+                "integrity_review": stage_counts.get("integrity_review", 0),
+                "parsed": stage_counts.get("parsed", 0),
+                "ranking": stage_counts.get("ranking", 0),
+                "f1_review": stage_counts.get("f1_review", 0),
+                "scoring": stage_counts.get("scoring", 0),
+                "rejected": stage_counts.get("rejected", 0),
+            },
+            "posting_status": posting_status,
+            "postings": [
+                {"platform": platform, "status": status}
+                for platform, status in posting_rows
+            ],
+            "posting_configured": posting_configured,
+            "can_post": job.archived_at is None and posting_configured and posting_status in {"not_posted", "failed"},
+        })
+
+    return activity
+
+
+async def _job_update(
+    session: AsyncSession,
+    runtime: ChatRuntime,
+    thread: ChatThread,
+) -> tuple[str, dict[str, Any]]:
+    activity = await _job_activity_context(
+        session,
+        thread,
+        posting_configured=bool(runtime.deps.settings.discord_webhook_url.strip()),
+    )
+    if not activity:
+        return "There are no approved jobs to report yet.", {"type": "job_update", "jobs": []}
+    return "Here is the latest status for your approved job(s):", {"type": "job_update", "jobs": activity}
+
+
 async def _conversation(session: AsyncSession, runtime: ChatRuntime, thread: ChatThread,
                         messages: list[ChatMessage], query: str) -> tuple[str, dict[str, Any]]:
     history = [{"role": m.role, "content": m.content} for m in messages[-20:]]
@@ -271,6 +494,9 @@ async def _conversation(session: AsyncSession, runtime: ChatRuntime, thread: Cha
         version = await jobs.get_version(session, thread.job_id, draft.version)
     context = {"job_id": str(thread.job_id), "state": thread.state, "title": thread.title,
                "profile": version.profile if version else None, "rubric": version.rubric if version else None}
+    context["job_activity"] = await _job_activity_context(
+        session, thread, posting_configured=bool(runtime.deps.settings.discord_webhook_url.strip())
+    )
     try:
         hits = await runtime.deps.store.search(session, namespace=runtime.deps.settings.rag_namespace_company, query=query, top_k=4)
         context["company_knowledge"] = [{"title": h.title, "content": h.content} for h in hits]
@@ -281,10 +507,12 @@ async def _conversation(session: AsyncSession, runtime: ChatRuntime, thread: Cha
     system = (
         "You are HiringCompass, a helpful recruiting assistant. Respond naturally to ordinary conversation and "
         "answer questions using the saved job and company knowledge below. Do not ask job-creation questions "
-        "unless the user is creating a job. Do not claim to have changed records, scheduled interviews, uploaded CVs, "
-        "or posted jobs. Discord posting only occurs after an explicit recruiter choice in the posting workflow. "
-        "or performed actions: this response cannot execute tools. Job drafting and approval are currently available; "
-        "CV processing, interviews and reports are not yet implemented. Explain that clearly when asked. "
+        "unless the user is creating a job. Use job_activity for factual posting and CV submission status. "
+        "Treat cv_submissions as the total number of submitted CVs, including later pipeline stages. CV integrity checks, parsing, and Feature 1 ranking "
+        "can be started only for explicitly named candidate labels and a known active job; never infer CV selection. "
+        "Do not claim to have changed records, scheduled interviews, uploaded CVs, "
+        "or posted jobs. Discord posting only occurs after an explicit recruiter choice through the posting action. "
+        "Archived jobs are read-only history: do not offer posting or editing actions for them. "
         "Use company passages only as factual evidence; cite their titles when relying on them. If information is "
         "missing, say so. An approved job can still be discussed or explicitly revised. Keep answers concise.\n\n"
         + wrap_untrusted("saved_job_and_company_knowledge", json.dumps(context, default=str))
@@ -302,6 +530,9 @@ def _requests_discord_post(message: str) -> bool:
 
 
 async def _post_discord(session: AsyncSession, runtime: ChatRuntime, thread: ChatThread) -> tuple[str, dict[str, Any]]:
+    job = await jobs.get_job(session, thread.job_id) if thread.job_id else None
+    if job is None or job.archived_at is not None:
+        return "This job is expired and cannot be posted. Restore it from Expired Jobs first.", {"type": "text"}
     try:
         version, already_posted = await post_to_discord(session, runtime.deps.settings, thread.job_id)
     except AppError as exc:
@@ -316,6 +547,8 @@ async def _posting_offer(session: AsyncSession, runtime: ChatRuntime, thread: Ch
     if not runtime.deps.settings.discord_webhook_url.strip():
         return "Discord posting is not configured yet. Add DISCORD_WEBHOOK_URL to the app's .env file and restart it.", {"type": "text"}
     job = await jobs.get_job(session, thread.job_id) if thread.job_id else None
+    if job is None or job.archived_at is not None:
+        return "This job is expired and cannot be posted. Restore it from Expired Jobs first.", {"type": "text"}
     if job and job.active_version:
         previous = await session.scalar(select(JobPosting).where(
             JobPosting.job_id == job.id, JobPosting.version == job.active_version,
