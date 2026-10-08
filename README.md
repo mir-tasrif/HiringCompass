@@ -4,7 +4,7 @@ HiringCompass is an AI-assisted recruitment platform that helps hiring teams rev
 
 ## Project status
 
-Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. Candidate screening, interviews and assessments remain under development.
+Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. CV upload, PDF text extraction with English OCR fallback, F11 integrity review, structured profile parsing, F1 requirement ranking, and recruiter review are available. Later scoring, interviews and assessments remain under development.
 
 ## Company knowledge for job descriptions
 
@@ -20,7 +20,15 @@ docker compose exec api python -m app.rag.ingest --namespace company
 
 Review the output for failed files. Retrieved company information and previously approved JDs inform drafting; previous JDs provide style references rather than new requirements. The sample company files are synthetic and should be replaced with approved company material for your demo.
 
-The assistant responds normally to greetings and questions. Job clarification starts when you request a JD. You can discuss a waiting draft without regenerating it, continue after approval, or explicitly request a revision. Revisions require approval before replacing the active version. Other recruitment actions are not yet available.
+The assistant responds normally to greetings and questions. Job clarification starts when you request a JD. You can discuss a waiting draft without regenerating it, continue after approval, or explicitly request a revision. Revisions require approval before replacing the active version.
+
+## CV integrity, parsing, and ranking
+
+Upload CVs under an approved job in the Jobs page. In Candidates, select up to 20 uploaded CVs and start **Proceed to CV integrity check and parsing**. A durable worker extracts PDF text, uses English Tesseract OCR for pages without usable text, checks for hidden/tiny/white text, unusual Unicode, and instruction-like content, then sends flagged documents to Review. OCR failures move to Rejected with a retained reason and event history. Clear CVs are parsed into education, experience, skills, certifications, and projects.
+
+After parsing, select up to 20 CVs for **Feature 1 ranking**. Ranking compares each profile with its job's mandatory and preferred requirements and retrieved company hiring knowledge. Each requirement receives a Met, Partially Met, or Unmet classification with evidence. Candidates are ranked within the selected batch and job. Missing mandatory requirements trigger the screening gate; recruiters can reject candidates in Review, while only candidates that pass the gate can proceed to Feature 2 Scoring.
+
+The worker runs as part of `docker compose up --build`. Progress and independent technical retries are stored in the database. In a linked job chat, explicitly name candidate labels (for example, `candidate001`) to start supported work. After parsing, the assistant asks before starting F1; human review decisions remain in the Candidates page.
 
 ## Solution overview
 
@@ -33,7 +41,7 @@ The system uses six LangGraph workflows:
 5. **Interview intelligence** — analyzes interview transcripts against job requirements.
 6. **Consolidated assessment** — combines screening, scoring, and interview evidence for human review.
 
-Each candidate workflow is isolated by job and candidate identifiers. Shared persistence and LangGraph checkpoints are planned to support recovery after interruption.
+Each candidate workflow is isolated by job and candidate identifiers. CV batches, per-CV status, extracted profiles, integrity findings, screening evidence, and review events persist in PostgreSQL so processing can continue after navigation or service restarts.
 
 ## Planned technology
 
