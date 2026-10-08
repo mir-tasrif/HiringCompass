@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     quarantine_dir: Path = Path("/app/storage/quarantine")
     max_upload_mb: int = Field(default=10, ge=1)
     max_pdf_pages: int = Field(default=15, ge=1)
-    allowed_upload_types: str = "application/pdf"
+    allowed_upload_types: str = (
+        "application/pdf,"
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
 
     # --- Company (used in job descriptions and postings) ---
     company_name: str = "Chorolin IT LTD"

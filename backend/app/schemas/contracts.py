@@ -63,7 +63,10 @@ class Severity(str, Enum):
 # Candidate application lifecycle (Project Plan section 11).
 class ApplicationStage(str, Enum):
     UPLOADED = "uploaded"
+    INTEGRITY_CHECK = "integrity_check"
+    PARSED = "parsed"
     INTEGRITY_REVIEW = "integrity_review"
+    RANKING = "ranking"
     SCREENING = "screening"
     ELIGIBILITY_HOLD = "eligibility_hold"
     SCREENED_OUT = "screened_out"

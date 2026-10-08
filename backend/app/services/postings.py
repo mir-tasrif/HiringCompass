@@ -22,6 +22,8 @@ async def post_to_discord(session: AsyncSession, settings: Settings, job_id: uui
     job = await jobs.get_job(session, job_id)
     if job is None or job.active_version is None:
         raise ConflictError("This job has no approved version ready to post.")
+    if job.archived_at is not None:
+        raise ConflictError("This job is expired and cannot be posted. Restore it from Expired Jobs first.")
     version = await jobs.get_version(session, job_id, job.active_version)
     if version is None or version.status != "active":
         raise ConflictError("This job has no approved version ready to post.")
