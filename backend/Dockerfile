@@ -5,9 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System packages: OCR engine (English) for scanned PDFs.
+# System packages: OCR for scanned PDFs and LibreOffice for DOCX-to-PDF normalization.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       tesseract-ocr tesseract-ocr-eng libreoffice-writer fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

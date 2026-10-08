@@ -1,5 +1,5 @@
 # HiringCompass local stack. Start core: docker compose up --build
-# Optional profiles: worker (Phase 3), web (Phase 4), see README.
+# Optional web profile is described in the README.
 
 # Shared environment/volumes for backend containers.
 x-backend: &backend
@@ -15,6 +15,8 @@ x-backend: &backend
   depends_on:
     db:
       condition: service_healthy
+    ollama-init:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 services:
@@ -50,11 +52,17 @@ services:
     ports:
       - "8000:8000"
 
-  # Background worker (claims durable work items); enabled once the worker module exists.
+  # Durable CV processing worker; API waits for the schema migration before it starts.
   worker:
     <<: *backend
-    command: ["python", "-m", "app.worker.runner"]
-    profiles: ["worker"]
+    command: ["python", "-m", "app.worker.cv_runner"]
+    environment:
+      LOG_DIR: /app/logs
+      ERROR_DIR: /app/errors
+      WORKER_ID: cv-worker
+    depends_on:
+      api:
+        condition: service_healthy
 
   # Local LLM + embeddings server (free, open source).
   ollama:
@@ -63,13 +71,19 @@ services:
       - hc_ollama:/root/.ollama
     ports:
       - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
   # One-shot job that pulls the configured models into the ollama volume.
   ollama-init:
     image: ollama/ollama:latest
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c", "if [ '${LLM_PROFILE:-local}' = 'local' ]; then ollama pull ${LLM_LOCAL_MODEL}; fi; ollama pull ${EMBEDDING_MODEL}"]
