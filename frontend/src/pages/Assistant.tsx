@@ -1,14 +1,62 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { ApiError } from "../api/client";
 import FormattedJd from "../components/FormattedJd";
+import FormattedMessage from "../components/FormattedMessage";
 import { ChatMessage, createThread, deleteThread, getThread, listThreads, sendDecision, sendMessage, ThreadDetail, ThreadSummary } from "../api/chat";
+import { postJob } from "../api/jobs";
 
 // Plain assistant or user bubble.
 function Bubble({ message, children }: { message: ChatMessage; children?: React.ReactNode }) {
   return (
     <div className={`bubble ${message.role}`}>
-      <p>{message.content}</p>
+      <FormattedMessage text={message.content} />
       {children}
+    </div>
+  );
+}
+
+function JobUpdateCard({
+  message,
+  working,
+  postingJobId,
+  onPost,
+}: {
+  message: ChatMessage;
+  working: boolean;
+  postingJobId: string | null;
+  onPost: (jobId: string) => void;
+}) {
+  const payload = message.payload;
+  if (!payload || payload.type !== "job_update") return null;
+
+  return (
+    <div className="bubble assistant wide job-update-card">
+      <FormattedMessage text={message.content} />
+      {payload.jobs.length === 0 ? <p>No approved jobs to show.</p> : payload.jobs.map((job) => (
+        <article className="job-update-item" key={job.job_id}>
+          <h3>{job.title}</h3>
+          <ul>
+            <li><strong>Job ID:</strong> {job.job_id}</li>
+            <li><strong>Job code:</strong> {job.job_code || "Not assigned"}</li>
+            <li><strong>Status:</strong> {job.archived ? "Expired" : "Approved"} · Version {job.version}</li>
+            <li><strong>Discord:</strong> {job.posting_status.replace(/_/g, " ")}</li>
+            <li><strong>Uploaded CVs:</strong> {job.cv_submissions}</li>
+            {job.cv_pipeline && <li><strong>CV pipeline:</strong> {job.cv_pipeline.uploaded} uploaded · {job.cv_pipeline.integrity_check} checking · {job.cv_pipeline.integrity_review} integrity review · {job.cv_pipeline.parsed} parsed · {job.cv_pipeline.ranking} ranking · {job.cv_pipeline.f1_review} F1 review · {job.cv_pipeline.scoring} scoring · {job.cv_pipeline.rejected} rejected</li>}
+          </ul>
+          <div className="posting-actions">
+            {!job.archived && job.posting_status !== "posted" && <button type="button" disabled={!job.can_post || working || postingJobId !== null} onClick={() => onPost(job.job_id)}>
+              {postingJobId === job.job_id ? "Posting…" : job.posting_status === "pending" ? "Discord post in progress" : job.posting_status === "failed" ? "Retry Discord post" : "Post to Discord"}
+            </button>}
+            {!job.posting_configured && job.posting_status !== "posted" && <span className="muted">Discord posting is not configured.</span>}
+            {job.cv_submissions > 0 && <>
+              {!job.archived && (job.cv_pipeline?.uploaded ?? 0) > 0 && <Link className="button-link" to={`/candidates?jobId=${encodeURIComponent(job.job_id)}&section=uploaded`}>Continue integrity check & parsing</Link>}
+              {!job.archived && (job.cv_pipeline?.parsed ?? 0) > 0 && <Link className="button-link" to={`/candidates?jobId=${encodeURIComponent(job.job_id)}&section=parsed`}>Select CVs for Feature 1</Link>}
+              {(job.archived || (job.cv_pipeline?.integrity_review ?? 0) > 0 || (job.cv_pipeline?.f1_review ?? 0) > 0) && <Link className="button-link" to={`/candidates?jobId=${encodeURIComponent(job.job_id)}&section=${job.archived ? "uploaded" : (job.cv_pipeline?.integrity_review ?? 0) > 0 || (job.cv_pipeline?.f1_review ?? 0) > 0 ? "review" : "uploaded"}`}>{job.archived ? "View candidate history" : "Review candidates"}</Link>}
+            </>}
+          </div>
+        </article>
+      ))}
     </div>
   );
 }
@@ -40,7 +88,7 @@ function DraftCard(props: {
 
   return (
     <div className="bubble assistant wide">
-      <p>{props.message.content}</p>
+      <FormattedMessage text={props.message.content} />
       <section
         className="jd-card"
         aria-label={`Draft job description: ${payload.title}`}
@@ -100,6 +148,7 @@ export default function Assistant() {
   const [thread, setThread] = useState<ThreadDetail | null>(null);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [postingJobId, setPostingJobId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const working = thread?.status === "working";
 
@@ -135,16 +184,16 @@ export default function Assistant() {
 
   // Poll while the assistant is working; stop when the reply has arrived.
   useEffect(() => {
-    if (!thread || thread.status !== "working") return;
+    if (!thread) return;
     const timer = setInterval(async () => {
       try {
         const latest = await getThread(thread.id);
         setThread(latest);
-        if (latest.status === "idle") void refreshList();
+        if ((thread.status === "working" && latest.status === "idle") || latest.messages.length > thread.messages.length) void refreshList();
       } catch (err) {
         fail(err);
       }
-    }, 1500);
+    }, thread.status === "working" ? 1500 : 4000);
     return () => clearInterval(timer);
   }, [thread, refreshList]);
 
@@ -163,6 +212,20 @@ export default function Assistant() {
       setError(null);
     } catch (err) {
       fail(err);
+    }
+  };
+
+  const postActivityJob = async (jobId: string) => {
+    if (!thread || working || postingJobId) return;
+    setPostingJobId(jobId);
+    setError(null);
+    try {
+      await postJob(jobId);
+      await send("What is the update?");
+    } catch (err) {
+      fail(err);
+    } finally {
+      setPostingJobId(null);
     }
   };
 
@@ -259,6 +322,9 @@ export default function Assistant() {
                     />
                   );
                 }
+                if (p?.type === "job_update") {
+                  return <JobUpdateCard key={m.id} message={m} working={Boolean(working)} postingJobId={postingJobId} onPost={(jobId) => void postActivityJob(jobId)} />;
+                }
                 return (
                   <Bubble key={m.id} message={m}>
                     {p?.type === "question" && m.id === last?.id && !working && Array.isArray(p.options) && p.options.length > 0 && (
@@ -279,6 +345,12 @@ export default function Assistant() {
                         </button>
                       </div>
                     )}
+                    {p?.type === "candidate_work" && <div className="posting-actions">
+                      {p.awaiting_confirmation === "ranking" ? <button type="button" disabled={Boolean(working)} onClick={() => void send("yes")}>Start Feature 1 Ranking</button> : null}
+                      <Link className="button-link" to={p.route}>
+                        {p.review_required || p.kind === "review" ? "Open Review" : p.awaiting_confirmation === "ranking" ? "Review Parsed CVs" : p.kind === "ranking" ? "Open Feature 1 Ranking" : p.kind === "integrity" ? "Open Integrity Check" : "Select CVs in Candidates"}
+                      </Link>
+                    </div>}
                   </Bubble>
                 );
               })}

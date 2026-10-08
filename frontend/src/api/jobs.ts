@@ -11,6 +11,7 @@ export interface ApprovedJob {
   jd_text: string;
   updated_at: string;
   posted_platforms: string[];
+  archived: boolean;
 }
 
 export interface JobDetail extends ApprovedJob {
@@ -24,6 +25,7 @@ export interface CvSubmission {
   original_filename: string | null;
   size_bytes: number;
   status: string;
+  converted_from_docx: boolean;
   uploaded_at: string;
 }
 
@@ -37,6 +39,11 @@ export interface CvUploadResult {
 }
 
 export const listApprovedJobs = (): Promise<ApprovedJob[]> => apiFetch("/jobs");
+export const listExpiredJobs = (): Promise<ApprovedJob[]> => apiFetch("/jobs/expired");
+export const archiveJob = (id: string): Promise<{ id: string; archived: boolean }> =>
+  apiFetch(`/jobs/${id}`, { method: "DELETE" });
+export const restoreJob = (id: string): Promise<{ id: string; archived: boolean }> =>
+  apiFetch(`/jobs/${id}/restore`, { method: "POST" });
 export const getJob = (id: string): Promise<JobDetail> => apiFetch(`/jobs/${id}`);
 export const postJob = (id: string): Promise<{ status: string; channel: string; version: number }> =>
   apiFetch(`/jobs/${id}/post`, { method: "POST" });

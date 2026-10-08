@@ -1,9 +1,11 @@
 """Upload validation tests (WBS 2.1.3): every rejection path, safe storage, duplicates, HTTP mapping."""
 
 import asyncio
+from io import BytesIO
 import os
 import stat
 import uuid
+import zipfile
 
 import psycopg
 import pymupdf
@@ -17,7 +19,8 @@ from app.api.errors import register_error_handlers
 from app.core.config import Settings
 from app.core.errors import UploadRejected
 from app.db.models import Application, Candidate, Document, Job, User
-from app.services.uploads import ensure_not_duplicate, process_upload, store_upload, validate_pdf_bytes
+from app.services import uploads as upload_service
+from app.services.uploads import ensure_not_duplicate, process_upload, store_upload, validate_pdf_bytes, validate_upload_bytes
 
 
 # Settings pointing at a temp storage dir with small limits.
@@ -47,6 +50,28 @@ def test_valid_pdf(settings):
     data = make_pdf(2)
     ok = validate_pdf_bytes(data, "cv.pdf", "application/pdf", settings)
     assert ok.page_count == 2 and ok.size_bytes == len(data) and len(ok.content_hash) == 64
+
+
+def test_docx_is_normalized_to_pdf(settings, monkeypatch):
+    source = BytesIO()
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", "<document/>")
+    expected_pdf = make_pdf()
+    monkeypatch.setattr(upload_service, "_convert_docx_to_pdf", lambda _data, _settings: expected_pdf)
+
+    normalized = validate_upload_bytes(
+        source.getvalue(),
+        "candidate.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        settings,
+    )
+
+    assert normalized.data == expected_pdf
+    assert normalized.extension == ".pdf"
+    assert normalized.converted_from_docx is True
+    assert normalized.page_count == 1
+    assert normalized.size_bytes == len(expected_pdf)
 
 
 # Every invalid input is rejected with a specific code.

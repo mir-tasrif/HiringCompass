@@ -54,7 +54,7 @@ export default function JobDetailPage() {
       <Link className="back-link" to="/jobs">← All jobs</Link>
       <header className="detail-heading">
         <div>
-          <div className="detail-kickers"><span className="job-code">{job.public_code}</span><span className="version-tag">Approved · v{job.version}</span></div>
+          <div className="detail-kickers"><span className="job-code">{job.public_code}</span><span className={job.archived ? "expired-tag" : "version-tag"}>{job.archived ? "Expired" : "Approved"} · v{job.version}</span></div>
           <h1>{job.title}</h1>
           <p className="muted">{[job.location, job.employment_type].filter(Boolean).join(" · ")}</p>
         </div>
@@ -66,9 +66,9 @@ export default function JobDetailPage() {
       </article>
       <footer className="job-detail-actions">
         <button type="button" className="secondary" onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</button>
-        <button type="button" onClick={() => void post()} disabled={posting || posted}>
+        {!job.archived && <button type="button" onClick={() => void post()} disabled={posting || posted}>
           {posting ? "Posting…" : posted ? "Posted to Discord" : "Post to Hiring Sites"}
-        </button>
+        </button>}
         <button type="button" className="secondary" onClick={() => navigate(`/jobs/${job.id}/updates`)}>See Updates</button>
       </footer>
     </div>

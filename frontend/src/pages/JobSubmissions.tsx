@@ -120,8 +120,24 @@ export default function JobSubmissions() {
         <section className="card cv-preview" aria-label="CV preview">
           {activePreview ? (
             <>
-              <div className="preview-heading"><div><strong>{activePreview.candidate_name}</strong><span className="muted">{activePreview.original_filename}</span></div><span className="file-badge">PDF</span></div>
-              {previewUrl ? <iframe title={`CV preview: ${activePreview.candidate_name}`} src={previewUrl} /> : <div className="preview-placeholder">Loading CV preview…</div>}
+              {(() => {
+                const filename = activePreview.original_filename || `${activePreview.candidate_name}.pdf`;
+
+                return (
+                  <>
+                    <div className="preview-heading">
+                      <div>
+                        <strong>{activePreview.candidate_name}</strong>
+                        <span className="muted">{filename}</span>
+                      </div>
+                      <span className="file-badge">PDF{activePreview.converted_from_docx ? " · converted" : ""}</span>
+                    </div>
+                    {previewUrl
+                      ? <iframe title={`CV preview: ${activePreview.candidate_name}`} src={previewUrl} />
+                      : <div className="preview-placeholder">Loading CV preview…</div>}
+                  </>
+                );
+              })()}
             </>
           ) : <div className="preview-placeholder"><span aria-hidden="true">▧</span><p>Select a CV to preview it here.</p></div>}
         </section>
