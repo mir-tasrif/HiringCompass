@@ -17,11 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_interviewer
 from app.core.config import get_settings
 from app.core.errors import AppError, NotFoundError, UploadRejected
-from app.db.models import Application, ApplicationEvent, Candidate, Document, Job, JobPosting, JobVersion, User
-from app.db.session import get_session
+from app.db.models import Application, ApplicationEvent, Candidate, CvBatchItem, Document, Job, JobPosting, JobVersion, User
+from app.db.session import SessionLocal, get_session
 from app.services import uploads
 from app.services.chat import ChatRuntime
 from app.services.postings import post_to_discord
+from app.services.cv_tasks import _finalize_batch, refresh_batch_status
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 settings = get_settings()
@@ -38,6 +39,7 @@ class JobCardOut(BaseModel):
     jd_text: str
     updated_at: datetime
     posted_platforms: list[str]
+    archived: bool
 
 
 class JobOut(JobCardOut):
@@ -51,6 +53,7 @@ class ApplicationOut(BaseModel):
     original_filename: str | None
     size_bytes: int
     status: str
+    converted_from_docx: bool
     uploaded_at: datetime
 
 
@@ -79,9 +82,14 @@ class PostOut(BaseModel):
     version: int
 
 
+class ArchiveJobOut(BaseModel):
+    id: uuid.UUID
+    archived: bool
+
+
 async def _approved_job(session: AsyncSession, job_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[Job, JobVersion]:
     job = await session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == owner_id))
-    if job is None or job.active_version is None:
+    if job is None or job.active_version is None or job.archived_at is not None:
         raise NotFoundError("Approved job not found.")
     version = await session.scalar(select(JobVersion).where(
         JobVersion.job_id == job.id, JobVersion.version == job.active_version, JobVersion.status == "active"
@@ -90,6 +98,18 @@ async def _approved_job(session: AsyncSession, job_id: uuid.UUID, owner_id: uuid
         raise NotFoundError("Approved job not found.")
     if job.public_code is None:
         raise NotFoundError("Approved job code is not available.")
+    return job, version
+
+
+async def _job_history(session: AsyncSession, job_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[Job, JobVersion]:
+    job = await session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == owner_id))
+    if job is None or job.active_version is None:
+        raise NotFoundError("Job not found.")
+    version = await session.scalar(select(JobVersion).where(
+        JobVersion.job_id == job.id, JobVersion.version == job.active_version, JobVersion.status == "active"
+    ))
+    if version is None or job.public_code is None:
+        raise NotFoundError("Job not found.")
     return job, version
 
 
@@ -102,7 +122,7 @@ async def _job_out(session: AsyncSession, job: Job, version: JobVersion) -> JobO
         id=job.id, public_code=job.public_code, title=job.title, version=version.version,
         summary=profile.get("summary", ""), location=profile.get("location"),
         employment_type=profile.get("employment_type"), jd_text=profile.get("posting_text", ""),
-        updated_at=job.updated_at, posted_platforms=posted, profile=profile,
+        updated_at=job.updated_at, posted_platforms=posted, archived=job.archived_at is not None, profile=profile,
     )
 
 
@@ -111,8 +131,23 @@ async def list_approved_jobs(user: User = Depends(get_current_interviewer), sess
     rows = (await session.execute(
         select(Job, JobVersion)
         .join(JobVersion, (JobVersion.job_id == Job.id) & (JobVersion.version == Job.active_version))
-        .where(Job.owner_id == user.id, Job.active_version.is_not(None), JobVersion.status == "active")
+        .where(Job.owner_id == user.id, Job.active_version.is_not(None), Job.archived_at.is_(None), JobVersion.status == "active")
         .order_by(Job.created_at.desc(), Job.id)
+    )).all()
+    output = []
+    for job, version in rows:
+        item = await _job_out(session, job, version)
+        output.append(JobCardOut(**item.model_dump(exclude={"profile"})))
+    return output
+
+
+@router.get("/expired", response_model=list[JobCardOut])
+async def list_expired_jobs(user: User = Depends(get_current_interviewer), session: AsyncSession = Depends(get_session)) -> list[JobCardOut]:
+    rows = (await session.execute(
+        select(Job, JobVersion)
+        .join(JobVersion, (JobVersion.job_id == Job.id) & (JobVersion.version == Job.active_version))
+        .where(Job.owner_id == user.id, Job.archived_at.is_not(None), JobVersion.status == "active")
+        .order_by(Job.archived_at.desc(), Job.id)
     )).all()
     output = []
     for job, version in rows:
@@ -123,8 +158,34 @@ async def list_approved_jobs(user: User = Depends(get_current_interviewer), sess
 
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(job_id: uuid.UUID, user: User = Depends(get_current_interviewer), session: AsyncSession = Depends(get_session)) -> JobOut:
-    job, version = await _approved_job(session, job_id, user.id)
+    job, version = await _job_history(session, job_id, user.id)
     return await _job_out(session, job, version)
+
+
+@router.delete("/{job_id}", response_model=ArchiveJobOut)
+async def archive_job(job_id: uuid.UUID, user: User = Depends(get_current_interviewer),
+                      session: AsyncSession = Depends(get_session)) -> ArchiveJobOut:
+    job = await session.scalar(
+        select(Job).where(Job.id == job_id, Job.owner_id == user.id, Job.archived_at.is_(None)).with_for_update()
+    )
+    if job is None or job.active_version is None:
+        raise NotFoundError("Active approved job not found.")
+    job.archived_at = datetime.now(timezone.utc)
+    await session.commit()
+    return ArchiveJobOut(id=job.id, archived=True)
+
+
+@router.post("/{job_id}/restore", response_model=ArchiveJobOut)
+async def restore_job(job_id: uuid.UUID, user: User = Depends(get_current_interviewer),
+                      session: AsyncSession = Depends(get_session)) -> ArchiveJobOut:
+    job = await session.scalar(
+        select(Job).where(Job.id == job_id, Job.owner_id == user.id, Job.archived_at.is_not(None)).with_for_update()
+    )
+    if job is None or job.active_version is None:
+        raise NotFoundError("Expired job not found.")
+    job.archived_at = None
+    await session.commit()
+    return ArchiveJobOut(id=job.id, archived=False)
 
 
 @router.post("/{job_id}/post", response_model=PostOut)
@@ -142,18 +203,19 @@ async def post_job(job_id: uuid.UUID, request: Request, user: User = Depends(get
 @router.get("/{job_id}/applications", response_model=list[ApplicationOut])
 async def list_applications(job_id: uuid.UUID, user: User = Depends(get_current_interviewer),
                             session: AsyncSession = Depends(get_session)) -> list[ApplicationOut]:
-    job, _ = await _approved_job(session, job_id, user.id)
+    job, _ = await _job_history(session, job_id, user.id)
     rows = (await session.execute(
         select(Application, Candidate, Document)
         .join(Candidate, Candidate.id == Application.candidate_id)
         .join(Document, Document.application_id == Application.id)
-        .where(Application.job_id == job.id, Application.stage == "uploaded")
+        .where(Application.job_id == job.id, Application.stage != "rejected")
         .order_by(Application.candidate_number)
     )).all()
     return [ApplicationOut(
         id=application.id, candidate_number=application.candidate_number, candidate_name=candidate.full_name,
         original_filename=document.original_filename, size_bytes=document.size_bytes,
-        status=document.status, uploaded_at=document.created_at,
+        status=document.status, converted_from_docx=document.status == "converted_from_docx",
+        uploaded_at=document.created_at,
     ) for application, candidate, document in rows]
 
 
@@ -168,7 +230,7 @@ async def upload_applications(job_id: uuid.UUID, files: Annotated[list[UploadFil
         try:
             validated = await uploads.process_upload(file, settings)
             locked_job = await session.scalar(select(Job).where(Job.id == job.id).with_for_update())
-            if locked_job is None or locked_job.active_version != version.version:
+            if locked_job is None or locked_job.active_version != version.version or locked_job.archived_at is not None:
                 raise NotFoundError("Approved job not found.")
             await uploads.ensure_not_duplicate(session, job.id, validated.content_hash)
             candidate_number = locked_job.next_candidate_number
@@ -183,7 +245,8 @@ async def upload_applications(job_id: uuid.UUID, files: Annotated[list[UploadFil
             await session.flush()
             session.add(Document(application_id=application.id, version=1, file_path=stored_path,
                                  original_filename=original_name, content_hash=validated.content_hash,
-                                 size_bytes=validated.size_bytes, status="stored"))
+                                 size_bytes=validated.size_bytes,
+                                 status="converted_from_docx" if validated.converted_from_docx else "stored"))
             locked_job.next_candidate_number += 1
             await session.commit()
             output.append(UploadOut(filename=original_name, success=True, application_id=application.id,
@@ -204,7 +267,7 @@ async def upload_applications(job_id: uuid.UUID, files: Annotated[list[UploadFil
 @router.get("/{job_id}/applications/{application_id}/file")
 async def preview_application_file(job_id: uuid.UUID, application_id: uuid.UUID,
                                    user: User = Depends(get_current_interviewer), session: AsyncSession = Depends(get_session)) -> FileResponse:
-    job, _ = await _approved_job(session, job_id, user.id)
+    job, _ = await _job_history(session, job_id, user.id)
     row = (await session.execute(
         select(Application, Candidate, Document)
         .join(Candidate, Candidate.id == Application.candidate_id)
@@ -222,15 +285,18 @@ async def preview_application_file(job_id: uuid.UUID, application_id: uuid.UUID,
         raise NotFoundError("CV file not found.") from exc
     if not path.is_file():
         raise NotFoundError("CV file not found.")
-    filename = document.original_filename or f"{candidate.full_name}.pdf"
-    headers = {"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}"}
-    return FileResponse(path, media_type="application/pdf", headers=headers)
+    source_filename = document.original_filename or f"{candidate.full_name}.pdf"
+    filename = f"{Path(source_filename).stem}.pdf"
+    media_type = "application/pdf"
+    disposition = "inline"
+    headers = {"Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(filename)}"}
+    return FileResponse(path, media_type=media_type, headers=headers)
 
 
 @router.delete("/{job_id}/applications", response_model=DeleteApplicationsOut)
 async def delete_applications(job_id: uuid.UUID, body: DeleteApplicationsBody,
                               user: User = Depends(get_current_interviewer), session: AsyncSession = Depends(get_session)) -> DeleteApplicationsOut:
-    job, _ = await _approved_job(session, job_id, user.id)
+    job, _ = await _job_history(session, job_id, user.id)
     reason = body.reason.strip()
     if not reason:
         raise HTTPException(status_code=422, detail="A reason is required.")
@@ -255,5 +321,14 @@ async def delete_applications(job_id: uuid.UUID, body: DeleteApplicationsBody,
             application_id=application.id, actor_id=user.id, action="deleted",
             from_stage=previous_stage, to_stage="rejected", reason=reason,
         ))
+    pending_items = list((await session.scalars(select(CvBatchItem).where(CvBatchItem.application_id.in_(ids),
+        CvBatchItem.status.in_(["queued", "waiting_review"])).with_for_update())).all())
+    finalize_ids: set[uuid.UUID] = set()
+    for item in pending_items:
+        item.status, item.error = "rejected", reason
+        finalize_ids.add(item.batch_id)
+        await refresh_batch_status(session, item.batch_id)
     await session.commit()
+    for batch_id in finalize_ids:
+        await _finalize_batch(SessionLocal, batch_id)
     return DeleteApplicationsOut(rejected_ids=[application.id for application in rows])
