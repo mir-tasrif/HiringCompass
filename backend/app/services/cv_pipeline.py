@@ -214,11 +214,18 @@ async def parse_candidate_profile(llm: Any, text: str) -> dict[str, Any]:
         "null for an unknown name/year/duration, and preserve concise evidence. Do not infer qualifications.\n\n" +
         wrap_untrusted("candidate_cv", safe_text)
     )
-    raw = await llm.chat([{"role": "system", "content": "You extract structured candidate facts accurately and conservatively. " + UNTRUSTED_NOTICE},
-                          {"role": "user", "content": prompt}], schema=_PROFILE_SCHEMA)
-    try:
-        profile = _CandidateProfileData.model_validate(json.loads(raw)).model_dump(mode="json")
-    except (TypeError, json.JSONDecodeError, ValidationError) as exc:
-        raise PermanentError("The AI returned an invalid structured candidate profile.") from exc
-    return profile
+    messages = [{"role": "system", "content": "You extract structured candidate facts accurately and conservatively. " + UNTRUSTED_NOTICE},
+                {"role": "user", "content": prompt}]
+    for attempt in range(2):
+        raw = await llm.chat(messages, schema=_PROFILE_SCHEMA)
+        try:
+            return _CandidateProfileData.model_validate(json.loads(raw)).model_dump(mode="json")
+        except (TypeError, json.JSONDecodeError, ValidationError) as exc:
+            if attempt:
+                raise PermanentError("The AI returned an invalid structured candidate profile after a repair attempt.") from exc
+            messages += [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": "Repair the response to match the requested JSON schema exactly. Return only a JSON object; use empty arrays and null for missing facts."},
+            ]
+    raise PermanentError("The AI returned an invalid structured candidate profile.")
 

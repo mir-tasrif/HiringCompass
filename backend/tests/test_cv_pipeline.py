@@ -1,11 +1,13 @@
 """F11 integrity checks for clean and deliberately adversarial CV documents."""
 
+import asyncio
+import json
 from pathlib import Path
 
 import pymupdf
 
 from app.core.config import Settings
-from app.services.cv_pipeline import extract_pdf_text, inspect_integrity, integrity_requires_review
+from app.services.cv_pipeline import extract_pdf_text, inspect_integrity, integrity_requires_review, parse_candidate_profile
 
 
 def _pdf(path: Path, *, injection: str = "", white_text: str = "") -> Path:
@@ -42,4 +44,23 @@ def test_prompt_injection_and_white_text_are_flagged(tmp_path):
     assert "instruction_like_text" in codes
     assert "white_text" in codes
     assert integrity_requires_review(signals)
+
+
+def test_candidate_profile_retries_invalid_json_once():
+    class ScriptedLLM:
+        def __init__(self):
+            self.replies = ["not json", json.dumps({
+                "candidate_name": "Jordan Lee", "education": [], "experience": [], "skills": ["Python"],
+                "certifications": [], "projects": [],
+            })]
+            self.calls = 0
+
+        async def chat(self, messages, *, schema=None):
+            self.calls += 1
+            return self.replies.pop(0)
+
+    llm = ScriptedLLM()
+    profile = asyncio.run(parse_candidate_profile(llm, "Jordan Lee, Python developer"))
+    assert profile["candidate_name"] == "Jordan Lee"
+    assert llm.calls == 2
 
