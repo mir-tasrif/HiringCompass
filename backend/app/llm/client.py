@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
@@ -42,7 +44,18 @@ class LLMClient:
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise TransientError(f"The {service} is unreachable or timed out.") from exc
         if response.status_code == 429 or response.status_code >= 500:
-            raise TransientError(f"The {service} is busy (HTTP {response.status_code}).")
+            retry_after = response.headers.get("Retry-After")
+            retry_seconds: float | None = None
+            if retry_after:
+                try:
+                    retry_seconds = max(0.0, float(retry_after))
+                except ValueError:
+                    try:
+                        retry_seconds = max(0.0, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+            raise TransientError(f"The {service} is busy (HTTP {response.status_code}).",
+                                 retry_after_seconds=retry_seconds)
         if response.status_code in (401, 403):
             raise PermanentError("The AI service rejected the API key.")
         if response.status_code >= 400:
@@ -76,7 +89,23 @@ class LLMClient:
                 instruction = "Reply only with one JSON object matching this JSON schema: " + json.dumps(schema)
                 payload["messages"] = [{"role": "system", "content": instruction}, *messages]
                 payload["response_format"] = {"type": "json_object"}
-        data = await self._request(self._chat_http, "POST", "/chat/completions", payload, service="configured chat AI service")
+        try:
+            data = await self._request(self._chat_http, "POST", "/chat/completions", payload,
+                                       service="configured chat AI service")
+        except PermanentError as exc:
+            # Some OpenAI-compatible providers reject constrained generation for a model even
+            # though they accept ordinary chat. Retry once with an explicit JSON instruction.
+            if schema is None or "HTTP 400" not in str(exc) or not any(
+                marker in str(exc).lower() for marker in ("failed to generate json", "failed_generation")
+            ):
+                raise
+            fallback = {**payload, "messages": [
+                {"role": "system", "content": "Return only a valid JSON object matching this schema: " + json.dumps(schema)},
+                *messages,
+            ]}
+            fallback.pop("response_format", None)
+            data = await self._request(self._chat_http, "POST", "/chat/completions", fallback,
+                                       service="configured chat AI service")
         content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
         if not content:
             raise TransientError("The AI service returned an empty reply.")

@@ -136,6 +136,7 @@ class Settings(BaseSettings):
     worker_max_concurrency: int = Field(default=4, ge=1)
     worker_max_attempts: int = Field(default=3, ge=1)
     worker_backoff_base_seconds: int = Field(default=5, ge=1)
+    worker_backoff_max_seconds: int = Field(default=300, ge=1)
 
     # --- Domain thresholds ---
     cv_batch_target_seconds: int = 300

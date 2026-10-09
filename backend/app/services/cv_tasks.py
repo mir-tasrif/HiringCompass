@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
-from app.core.errors import PermanentError
+from app.core.errors import PermanentError, TransientError
 from app.db.models import (Application, ApplicationEvent, Candidate, CandidateProfile, CandidateScreening,
                            ChatMessage, ChatThread, CvBatch, CvBatchItem, Document, Job, JobVersion)
 from app.rag.store import KnowledgeStore
@@ -24,6 +24,15 @@ from app.services.cv_pipeline import (CvExtractionFailure, _safe_path, extract_p
 
 class CandidateStageChanged(Exception):
     """A recruiter moved the application while an AI task was running."""
+
+
+def _retry_delay_seconds(settings: Settings, attempts: int, error: Exception) -> int:
+    """Exponential per-item delay, bounded and never shorter than a provider Retry-After hint."""
+    delay = min(settings.worker_backoff_max_seconds,
+                settings.worker_backoff_base_seconds * (2 ** min(max(attempts - 1, 0), 10)))
+    if isinstance(error, TransientError) and error.retry_after_seconds is not None:
+        delay = min(settings.worker_backoff_max_seconds, max(delay, int(error.retry_after_seconds)))
+    return delay
 
 
 class _RequirementResult(BaseModel):
@@ -142,16 +151,39 @@ async def _notify_chat_completion(session: AsyncSession, batch: CvBatch) -> None
         count = len(application_ids)
         rejected = sum(item.status == "rejected" for item in items)
         failed = sum(item.status == "failed" for item in items)
-        if count:
+        if count and batch.auto_start_ranking:
+            ranking_batch = CvBatch(owner_id=batch.owner_id, job_id=batch.job_id, thread_id=batch.thread_id,
+                                    kind="ranking", status="queued", total=count)
+            session.add(ranking_batch)
+            await session.flush()
+            for application_id in application_ids:
+                app = await session.get(Application, uuid.UUID(application_id), with_for_update=True)
+                if app is None or app.stage != "parsed":
+                    continue
+                app.stage = "ranking"
+                session.add(CvBatchItem(batch_id=ranking_batch.id, application_id=app.id, status="queued"))
+                session.add(ApplicationEvent(application_id=app.id, actor_id=batch.owner_id,
+                    action="batch_started", from_stage="parsed", to_stage="ranking",
+                    reason="Recruiter requested integrity, parsing, and F1 ranking in the job chat."))
+            message = (f"Integrity checks and profile parsing finished for {count} CV(s) under {job.public_code}; "
+                       f"Feature 1 ranking has now started for the successfully parsed CVs. "
+                       f"{rejected} CV(s) were moved to Rejected; {failed} CV(s) need a technical retry. "
+                       "I’ll direct you to Review when ranking finishes.")
+            payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=ranking",
+                       "job_id": str(job.id), "job_code": job.public_code, "kind": "ranking",
+                       "batch_id": str(ranking_batch.id)}
+        elif count:
             message = (f"Integrity checks and profile parsing finished for {count} CV(s) under {job.public_code}. "
                        f"{rejected} CV(s) were moved to Rejected with reasons; {failed} CV(s) need a technical retry. "
                        "Would you like me to start Feature 1 ranking for the parsed CVs?")
+            payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=parsed",
+                       "job_id": str(job.id), "job_code": job.public_code, "kind": "ranking",
+                       "awaiting_confirmation": "ranking", "application_ids": application_ids}
         else:
             message = (f"No CVs from this batch could be parsed successfully under {job.public_code}. "
                        f"{rejected} CV(s) are in Rejected with reasons; {failed} technical failure(s) can be retried in Candidates.")
-        payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=parsed",
-                   "job_id": str(job.id), "job_code": job.public_code, "kind": "ranking",
-                   "awaiting_confirmation": "ranking" if count else None, "application_ids": application_ids}
+            payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=integrity",
+                       "job_id": str(job.id), "job_code": job.public_code, "kind": "integrity"}
     elif batch.kind == "ranking":
         failed = sum(item.status == "failed" for item in items)
         message = (f"Feature 1 ranking finished for the selected CV batch under {job.public_code}. "
@@ -311,18 +343,26 @@ async def _screen_one(session: AsyncSession, application: Application, llm: Any,
         "clarify the role but cannot establish candidate qualifications.\n" + json.dumps(input_context, ensure_ascii=False) + "\n" +
         wrap_untrusted("candidate_cv_evidence", profile_row.extracted_text[:50_000]) + "\n" +
         wrap_untrusted("company_hiring_knowledge", json.dumps(company_context, ensure_ascii=False)))
-    raw = await llm.chat([{"role": "system", "content": "You are a conservative, evidence-grounded CV screening assistant. " + UNTRUSTED_NOTICE},
-                          {"role": "user", "content": prompt}], schema=_SCREENING_SCHEMA)
-    try:
-        result = _ScreeningOutput.model_validate(json.loads(raw))
-        score = result.suitability_score
-        requirement_results = [requirement.model_dump() for requirement in result.requirements]
-        expected = {(r.get("text", ""), r.get("kind", "preferred")) for r in requirements if isinstance(r, dict)}
-        actual = {(r["text"], r["kind"]) for r in requirement_results}
-        if expected and not expected.issubset(actual):
-            raise ValueError("The model omitted one or more job requirements")
-    except (TypeError, ValueError, KeyError, AttributeError, json.JSONDecodeError, ValidationError) as exc:
-        raise PermanentError("The AI returned incomplete requirement screening results.") from exc
+    messages = [{"role": "system", "content": "You are a conservative, evidence-grounded CV screening assistant. " + UNTRUSTED_NOTICE},
+                {"role": "user", "content": prompt}]
+    expected = {(r.get("text", ""), r.get("kind", "preferred")) for r in requirements if isinstance(r, dict)}
+    for attempt in range(2):
+        raw = await llm.chat(messages, schema=_SCREENING_SCHEMA)
+        try:
+            result = _ScreeningOutput.model_validate(json.loads(raw))
+            score = result.suitability_score
+            requirement_results = [requirement.model_dump() for requirement in result.requirements]
+            actual = {(r["text"], r["kind"]) for r in requirement_results}
+            if expected and not expected.issubset(actual):
+                raise ValueError("The model omitted one or more job requirements")
+            break
+        except (TypeError, ValueError, KeyError, AttributeError, json.JSONDecodeError, ValidationError) as exc:
+            if attempt:
+                raise PermanentError("The AI returned incomplete requirement screening results after a repair attempt.") from exc
+            messages += [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": "Repair the screening JSON: include every job requirement exactly once with valid status, evidence, score, and explanation. Return only valid JSON."},
+            ]
     current_application = await session.scalar(select(Application).where(Application.id == application.id)
         .with_for_update().execution_options(populate_existing=True))
     if current_application is None or current_application.stage != "ranking":
@@ -369,7 +409,7 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
         item = await session.scalar(select(CvBatchItem).where(
-            (CvBatchItem.status == "queued") |
+            ((CvBatchItem.status == "queued") & ((CvBatchItem.next_attempt_at.is_(None)) | (CvBatchItem.next_attempt_at <= now))) |
             ((CvBatchItem.status == "processing") & (CvBatchItem.lease_expires_at < now))
         ).order_by(CvBatchItem.created_at).with_for_update(skip_locked=True).limit(1))
         if item is None:
@@ -386,6 +426,7 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
             return True
         item.status = "processing"
         item.attempts += 1
+        item.next_attempt_at = None
         lease_seconds = max(settings.worker_lease_seconds, settings.llm_timeout_seconds + 780,
                             settings.cv_batch_target_seconds)
         item.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -431,7 +472,7 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
                 batch_id = item.batch_id
                 application = await session.get(Application, item.application_id)
                 item.status = "rejected" if application and application.stage == "rejected" else "failed"
-                item.error, item.lease_expires_at = str(exc)[:2000], None
+                item.error, item.lease_expires_at, item.next_attempt_at = str(exc)[:2000], None, None
                 await refresh_batch_status(session, item.batch_id)
                 await session.commit()
         if batch_id:
@@ -445,10 +486,15 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
                 app = await session.get(Application, item.application_id)
                 item.lease_expires_at = None
                 if app and app.stage == "rejected":
-                    item.status, item.error = "rejected", "The CV was rejected while processing was in progress."
+                    item.status, item.error, item.next_attempt_at = "rejected", "The CV was rejected while processing was in progress.", None
                 else:
                     item.error = str(exc)[:2000]
-                    item.status = "queued" if item.attempts < settings.worker_max_attempts else "failed"
+                    if item.attempts < settings.worker_max_attempts:
+                        delay = _retry_delay_seconds(settings, item.attempts, exc)
+                        item.status = "queued"
+                        item.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    else:
+                        item.status, item.next_attempt_at = "failed", None
                 await refresh_batch_status(session, item.batch_id)
                 await session.commit()
         if batch_id:

@@ -107,6 +107,7 @@ class CvBatch(Base, IdMixin, TimestampMixin):
     kind: Mapped[str] = mapped_column(String(30))
     status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
     total: Mapped[int] = mapped_column(Integer)
+    auto_start_ranking: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     completion_notified: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
 
 
@@ -116,6 +117,7 @@ class CvBatchItem(Base, IdMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("batch_id", "application_id", name="uq_cv_batch_items_batch_application"),
         Index("ix_cv_batch_items_status_created", "status", "created_at"),
+        Index("ix_cv_batch_items_next_attempt", "status", "next_attempt_at"),
     )
 
     batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cv_batches.id", ondelete="CASCADE"))
@@ -123,6 +125,7 @@ class CvBatchItem(Base, IdMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     review_notified: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
 
