@@ -224,7 +224,7 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
         return confirmation
-    cv_work = await _handle_candidate_work_request(session, thread, last_user.content)
+    cv_work = await _handle_candidate_work_request(session, thread, last_user.content, messages)
     if cv_work is not None:
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
@@ -291,24 +291,35 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
     return await _interpret(session, runtime, thread, result)
 
 
-async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThread,
-                                         message: str) -> tuple[str, dict[str, Any]] | None:
-    """Allow explicit, label-based CV batches from chat; never infer a candidate selection."""
+async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThread, message: str,
+                                         messages: list[ChatMessage] | None = None) -> tuple[str, dict[str, Any]] | None:
+    """Start CV work for explicit labels or a clear all/available follow-up in the linked job chat."""
     text = message.strip()
     lowered = text.lower()
+    previous_assistant = next((m for m in reversed((messages or [])[:-1]) if m.role == "assistant"), None)
+    previous_payload = (previous_assistant.payload or {}) if previous_assistant else {}
+    labels = [int(number) for number in re.findall(r"\bcandidate\s*0*(\d{1,6})\b", lowered)]
     integrity_request = bool(re.search(r"\b(?:integrity|parse|parsing|extract(?:ion)?)\b", lowered) and
                              re.search(r"\b(?:cv|cvs|resume|resumes|candidate|candidates)\b", lowered))
     ranking_request = bool(re.search(r"\b(?:rank|ranking|screen|screening|feature\s*1|f1)\b", lowered) and
                            re.search(r"\b(?:cv|cvs|resume|resumes|candidate|candidates)\b", lowered))
+    if not integrity_request and not ranking_request and previous_payload.get("type") == "candidate_work":
+        prior_kind = previous_payload.get("kind")
+        if prior_kind == "integrity" and (labels or re.search(r"\b(?:start|proceed|yes|all|them|those)\b", lowered)):
+            integrity_request = True
+        elif prior_kind == "ranking" and (labels or re.search(r"\b(?:start|proceed|yes|all|them|those)\b", lowered)):
+            ranking_request = True
     if not integrity_request and not ranking_request:
         return None
-    labels = [int(number) for number in re.findall(r"\bcandidate\s*0*(\d{1,6})\b", lowered)]
+    all_requested = bool(re.search(r"\b(?:all|every|available|these|them|those)\b", lowered))
     job_code_match = re.search(r"\bjd\s*0*(\d{1,6})\b", lowered, re.I)
     job = await jobs.get_job(session, thread.job_id) if thread.job_id else None
     if job is not None and job.archived_at is not None and thread.state == "approved":
         return "This chat is linked to an expired job and is read-only. Start a new job chat to process CVs for an active job.", {"type": "text"}
-    if job is not None and (job.active_version is None or job.archived_at is not None):
-        job = None
+    if job is not None and job.active_version is None:
+        return (f"I found the job linked to this chat ({job.public_code or job.title}), but it has no active approved version recorded. "
+                "Please check its status in Jobs; I won’t label it inactive without that status check.",
+                {"type": "candidate_work", "route": "/jobs?section=approved", "job_id": str(job.id)})
     if job_code_match:
         code = f"JD{int(job_code_match.group(1)):03d}"
         explicit_job = await session.scalar(select(Job).where(Job.owner_id == thread.owner_id,
@@ -325,25 +336,44 @@ async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThre
         return "Finish reviewing the current job-description draft first. Then I can start CV work for an approved job.", {"type": "text"}
     if thread.job_id != job.id:
         thread.job_id, thread.title, thread.state = job.id, job.title, "approved"
+    expected_stage = "uploaded" if integrity_request else "parsed"
     route = f"/candidates?jobId={job.id}&section={'uploaded' if integrity_request else 'parsed'}"
-    if not labels:
+    if not labels and not all_requested:
         task = "integrity check and parsing" if integrity_request else "Feature 1 ranking"
-        return (f"I can start {task} after you identify the CVs. Name candidate labels such as candidate001, or select up to 20 CVs for {job.public_code} in Candidates.",
+        return (f"I can start {task} for {job.public_code}. Say ‘all uploaded CVs’ to process every eligible CV for this job, or name candidate labels (up to 20).",
                 {"type": "candidate_work", "route": route, "job_id": str(job.id), "job_code": job.public_code,
-                 "kind": "integrity" if integrity_request else "ranking"})
+                 "kind": "integrity" if integrity_request else "ranking",
+                 "auto_start_ranking": bool(integrity_request and ranking_request)})
     if len(labels) > 20:
         return "A batch can contain up to 20 CVs. Please name a smaller group or select them in Candidates.", {"type": "candidate_work", "route": route}
-    expected_stage = "uploaded" if integrity_request else "parsed"
-    applications = list(await session.scalars(select(Application).where(Application.job_id == job.id,
-        Application.candidate_number.in_(set(labels)), Application.stage == expected_stage).order_by(Application.candidate_number)))
-    found = {application.candidate_number for application in applications}
-    missing = sorted(set(labels) - found)
-    if missing:
-        missing_labels = ", ".join(f"candidate{number:03d}" for number in missing)
-        return (f"I couldn't start the batch because {missing_labels} is not in the {expected_stage.replace('_', ' ')} stage for {job.public_code}. Check the job and CV section.",
-                {"type": "candidate_work", "route": route})
+    if labels:
+        applications = list(await session.scalars(select(Application).where(Application.job_id == job.id,
+            Application.candidate_number.in_(set(labels)), Application.stage == expected_stage).order_by(Application.candidate_number)))
+        found = {application.candidate_number for application in applications}
+        missing = sorted(set(labels) - found)
+        if missing:
+            missing_labels = ", ".join(f"candidate{number:03d}" for number in missing)
+            return (f"I couldn't start the batch because {missing_labels} is not in the {expected_stage.replace('_', ' ')} stage for {job.public_code}. Check the job and CV section.",
+                    {"type": "candidate_work", "route": route})
+    else:
+        applications = list(await session.scalars(select(Application).where(
+            Application.job_id == job.id, Application.stage == expected_stage
+        ).order_by(Application.candidate_number).limit(21)))
+        if len(applications) > 20:
+            return (f"There are more than 20 eligible CVs for {job.public_code}. Please select or name up to 20 for this batch.",
+                    {"type": "candidate_work", "route": route, "job_id": str(job.id), "job_code": job.public_code,
+                     "kind": "integrity" if integrity_request else "ranking"})
+        if not applications:
+            stage_label = "uploaded" if integrity_request else "parsed"
+            return (f"There are no {stage_label} CVs ready for that task under {job.public_code}.",
+                    {"type": "candidate_work", "route": route, "job_id": str(job.id), "job_code": job.public_code,
+                     "kind": "integrity" if integrity_request else "ranking"})
     kind = "integrity_parse" if integrity_request else "ranking"
-    batch = CvBatch(owner_id=thread.owner_id, job_id=job.id, thread_id=thread.id, kind=kind, status="queued", total=len(applications))
+    auto_start_ranking = bool(integrity_request and ranking_request)
+    if integrity_request and previous_payload.get("auto_start_ranking"):
+        auto_start_ranking = True
+    batch = CvBatch(owner_id=thread.owner_id, job_id=job.id, thread_id=thread.id, kind=kind,
+                    status="queued", total=len(applications), auto_start_ranking=auto_start_ranking)
     session.add(batch)
     await session.flush()
     for application in applications:
@@ -355,9 +385,12 @@ async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThre
             reason=f"Recruiter started {('integrity check and parsing' if integrity_request else 'Feature 1 ranking')} from the job chat."))
     await session.commit()
     operation = "Integrity check and parsing" if integrity_request else "Feature 1 ranking"
-    return (f"{operation} has started for {len(applications)} CV(s) under {job.public_code}. Processing continues in the background; review any flagged results in Candidates.",
+    followup = (" F1 ranking will start automatically for CVs that finish parsing successfully." if auto_start_ranking else
+                " After parsing finishes, I’ll ask before starting F1 ranking." if integrity_request else "")
+    return (f"{operation} has started for {len(applications)} CV(s) under {job.public_code}. Processing continues in the background.{followup}",
             {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section={'integrity' if integrity_request else 'ranking'}",
-             "batch_id": str(batch.id), "job_id": str(job.id), "job_code": job.public_code, "kind": "integrity" if integrity_request else "ranking"})
+             "batch_id": str(batch.id), "job_id": str(job.id), "job_code": job.public_code,
+             "kind": "integrity" if integrity_request else "ranking"})
 
 
 async def _confirm_candidate_work(session: AsyncSession, thread: ChatThread, messages: list[ChatMessage],
@@ -509,7 +542,8 @@ async def _conversation(session: AsyncSession, runtime: ChatRuntime, thread: Cha
         "answer questions using the saved job and company knowledge below. Do not ask job-creation questions "
         "unless the user is creating a job. Use job_activity for factual posting and CV submission status. "
         "Treat cv_submissions as the total number of submitted CVs, including later pipeline stages. CV integrity checks, parsing, and Feature 1 ranking "
-        "can be started only for explicitly named candidate labels and a known active job; never infer CV selection. "
+        "can be started from explicit candidate labels or a clear request for all/available CVs in the linked active job. "
+        "Never infer a CV set from vague wording; ask which CVs when the selection is unclear. "
         "Do not claim to have changed records, scheduled interviews, uploaded CVs, "
         "or posted jobs. Discord posting only occurs after an explicit recruiter choice through the posting action. "
         "Archived jobs are read-only history: do not offer posting or editing actions for them. "
