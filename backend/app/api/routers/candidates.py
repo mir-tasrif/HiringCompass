@@ -282,7 +282,7 @@ async def retry_batch_item(item_id: uuid.UUID, user: User = Depends(get_current_
     application = await session.get(Application, item.application_id)
     if application is None or application.stage == "rejected":
         raise HTTPException(status_code=409, detail="Rejected CVs must be uploaded again to retry.")
-    item.status, item.attempts, item.error, item.lease_expires_at = "queued", 0, None, None
+    item.status, item.attempts, item.error, item.next_attempt_at, item.lease_expires_at = "queued", 0, None, None, None
     batch = await session.get(CvBatch, item.batch_id)
     if batch:
         batch.status, batch.completion_notified = "queued", False

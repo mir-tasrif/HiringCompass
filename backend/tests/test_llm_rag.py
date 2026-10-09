@@ -132,6 +132,29 @@ def test_error_mapping(settings):
     assert "API key" in str(bad_key.value)
 
 
+def test_rate_limit_captures_retry_after(settings):
+    client = client_with(settings, lambda r: httpx.Response(429, headers={"Retry-After": "17"}, json={}))
+    with pytest.raises(TransientError) as exc:
+        asyncio.run(client.chat([{"role": "user", "content": "x"}]))
+    assert exc.value.retry_after_seconds == 17
+
+
+def test_schema_generation_failure_falls_back_to_plain_json(settings):
+    bodies = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) == 1:
+            return httpx.Response(400, json={"error": {"message": "Failed to generate JSON; see failed_generation"}})
+        return chat_reply('{"title":"ok","score":7}')
+
+    result = asyncio.run(client_with(settings, handler).chat(
+        [{"role": "user", "content": "screen candidate"}], schema=Verdict.model_json_schema()))
+    assert json.loads(result) == {"title": "ok", "score": 7}
+    assert "response_format" in bodies[0] and "response_format" not in bodies[1]
+
+
 # Invalid first reply triggers a repair prompt naming fields only; the second reply is accepted.
 def test_structured_repair(settings):
     replies = ['{"title": "ok"}', '{"title": "ok", "score": 7}']
