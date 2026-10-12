@@ -187,6 +187,45 @@ class CandidateScore(Base, IdMixin, TimestampMixin):
     input_hash: Mapped[str] = mapped_column(String(64))
 
 
+class InterviewSession(Base, IdMixin, TimestampMixin):
+    __tablename__ = "interview_sessions"
+    __table_args__ = (Index("ix_interview_sessions_owner_schedule", "owner_id", "scheduled_at"),)
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"))
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    candidate_email: Mapped[str] = mapped_column(String(255))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    timezone_name: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(24), default="scheduled", server_default="scheduled")
+    invitation_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    invitation_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invitation_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    candidate_waiting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    candidate_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interviewer_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    candidate_admitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    candidate_joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    interviewer_joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    questions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+
+
+class InterviewTurn(Base, IdMixin, TimestampMixin):
+    __tablename__ = "interview_turns"
+    __table_args__ = (UniqueConstraint("session_id", "role", "chunk_id", name="uq_interview_turn_chunk"),
+                      Index("ix_interview_turns_session_time", "session_id", "started_at"))
+
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("interview_sessions.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(20))
+    chunk_id: Mapped[str] = mapped_column(String(80))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    text: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(String(40), default="groq_whisper")
+
+
 # Append-only stage and rejection history for each application.
 class ApplicationEvent(Base, IdMixin):
     __tablename__ = "application_events"
