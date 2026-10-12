@@ -309,6 +309,11 @@ async def process_intake_item(session_factory: async_sessionmaker[AsyncSession],
             await session.commit()
             return
         profile_row.profile = await parse_candidate_profile(llm, profile_row.extracted_text)
+        parsed_email = profile_row.profile.get("email")
+        if parsed_email:
+            candidate = await session.get(Candidate, application.candidate_id)
+            if candidate and not candidate.email:
+                candidate.email = parsed_email
         current_application = await session.scalar(select(Application).where(Application.id == application.id)
             .with_for_update().execution_options(populate_existing=True))
         if current_application is None or current_application.stage != "integrity_check":

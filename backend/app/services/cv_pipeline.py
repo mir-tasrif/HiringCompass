@@ -54,6 +54,18 @@ class CvExtractionFailure(PermanentError):
     """The document opened but yielded no usable text, including after OCR."""
 
 
+_EMAIL_PATTERN = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
+
+
+def extract_candidate_email(text: str) -> str | None:
+    """Read a contact address directly from CV text; do not ask an LLM to invent one."""
+    for match in _EMAIL_PATTERN.finditer(text[:30_000]):
+        address = match.group(0).strip(".,;:()[]<>").lower()
+        if len(address) <= 255:
+            return address
+    return None
+
+
 _INJECTION_PATTERNS = (
     re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions\b", re.I),
     re.compile(r"\b(?:system|developer)\s+prompt\b", re.I),
@@ -219,7 +231,9 @@ async def parse_candidate_profile(llm: Any, text: str) -> dict[str, Any]:
     for attempt in range(2):
         raw = await llm.chat(messages, schema=_PROFILE_SCHEMA)
         try:
-            return _CandidateProfileData.model_validate(json.loads(raw)).model_dump(mode="json")
+            profile = _CandidateProfileData.model_validate(json.loads(raw)).model_dump(mode="json")
+            profile["email"] = extract_candidate_email(text)
+            return profile
         except (TypeError, json.JSONDecodeError, ValidationError) as exc:
             if attempt:
                 raise PermanentError("The AI returned an invalid structured candidate profile after a repair attempt.") from exc

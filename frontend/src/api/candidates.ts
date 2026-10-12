@@ -16,6 +16,7 @@ export interface CandidateCv {
   job_version: number;
   candidate_number: number;
   candidate_name: string;
+  candidate_email: string | null;
   source: string;
   original_filename: string | null;
   converted_from_docx: boolean;

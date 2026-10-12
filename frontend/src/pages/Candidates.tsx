@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { actOnCandidateCvs, CandidateAction, CandidateCv, CandidateSection, CvBatch,
   decideCandidateReview, getCvBatch, getF2Weights, listActiveCvBatches, listCandidateCvs, retryCvBatchItem, startCvBatch, startF2Batch } from "../api/candidates";
@@ -299,6 +299,7 @@ export default function Candidates() {
           <div className="preview-heading"><div><strong>{activePreview.job_code} · {activePreview.job_title} · {activePreview.candidate_name}</strong><span className="muted">{activePreview.original_filename}</span></div><span className="file-badge">PDF{activePreview.converted_from_docx ? " · converted" : ""}</span></div>
           {previewUrl ? <iframe title={`CV preview: ${activePreview.candidate_name}`} src={previewUrl} /> : <div className="preview-placeholder">Loading CV preview…</div>}
           {activePreview.parsed_profile && <div className="candidate-profile"><h3>Parsed candidate profile</h3><p><strong>Candidate name:</strong> {String(activePreview.parsed_profile.candidate_name ?? "Not identified")}</p>
+            <p><strong>Email:</strong> {activePreview.candidate_email ?? "Not found in CV"}</p>
             {(["education", "experience", "skills", "certifications", "projects"] as const).map((key) => <div key={key}><h4>{stageLabel(key)}</h4><pre>{JSON.stringify(activePreview.parsed_profile?.[key] ?? [], null, 2)}</pre></div>)}
           </div>}
           {(section === "integrity" || activePreview.integrity_verdict || activePreview.integrity_signals.length > 0) && <div className="candidate-history"><h3>F11 integrity evidence · {activePreview.integrity_verdict ? stageLabel(activePreview.integrity_verdict) : activePreview.stage === "integrity_check" ? "Processing" : activePreview.stage === "rejected" && activePreview.rejection_action === "deleted" ? "Deleted" : "Extraction failed"}</h3>
@@ -318,6 +319,7 @@ export default function Candidates() {
             {activePreview.scoring.dimensions.map((dimension) => <article className="history-event" key={dimension.key}><strong>{scoreDimensions.find((entry) => entry.key === dimension.key)?.label ?? stageLabel(dimension.key)} · {dimension.missing ? "No evidence" : `${dimension.score}/100`} · weight {activePreview.scoring?.weights[dimension.key] ?? 0}%</strong><p>{dimension.justification}</p><p><strong>CV evidence:</strong> {dimension.evidence || "No supporting evidence found."}</p></article>)}
           </div>}
           {section === "scoring" && activePreview.stage === "f2_review" && <div className="candidate-actions review-actions"><button type="button" className="secondary" onClick={() => void prepareScoring(activePreview.id)} disabled={saving}>Rescore this CV</button></div>}
+          {section === "interview" && <div className="candidate-actions review-actions"><Link to={`/interviews?applicationId=${activePreview.id}`}>Schedule interview for this candidate →</Link></div>}
           {section === "review" && <div className="candidate-actions review-actions"><button type="button" onClick={() => void review("approve")} disabled={saving || (activePreview.stage === "f1_review" && !activePreview.screening?.mandatory_pass)}>{saving ? "Saving…" : activePreview.stage === "integrity_review" ? "Approve and continue parsing" : activePreview.stage === "f2_review" ? "Select for interview" : "Approve for Feature 2"}</button><button type="button" className="danger-button" onClick={() => void review("reject")} disabled={saving}>Reject CV</button>{activePreview.stage === "f1_review" && !activePreview.screening?.mandatory_pass && <p className="muted">The mandatory-requirement gate blocks progression. This CV can be rejected with a reason.</p>}</div>}
           {section === "rejected" && <div className="candidate-history"><h3>Decision history</h3>{activePreview.events.map((event, index) => <article className="history-event" key={`${event.created_at}-${index}`}><div><strong>{stageLabel(event.action)}</strong><span>{new Date(event.created_at).toLocaleString()}</span></div><p>Moved from {stageLabel(event.from_stage)} to {stageLabel(event.to_stage)}</p><p>{event.reason}</p></article>)}</div>}
         </> : <div className="preview-placeholder"><span aria-hidden="true">▧</span><p>Select a CV to inspect its details.</p></div>}

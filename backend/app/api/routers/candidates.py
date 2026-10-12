@@ -41,6 +41,7 @@ class CandidateCvOut(BaseModel):
     job_version: int
     candidate_number: int
     candidate_name: str
+    candidate_email: str | None = None
     source: str
     original_filename: str | None
     converted_from_docx: bool
@@ -222,7 +223,8 @@ async def list_candidate_cvs(
         }
         result.append(CandidateCvOut(id=application.id, job_id=job.id, job_code=job.public_code or "",
             job_title=job.title, job_version=application.job_version, candidate_number=application.candidate_number,
-            candidate_name=candidate.full_name, source=application.source, original_filename=document.original_filename,
+            candidate_name=candidate.full_name, candidate_email=candidate.email,
+            source=application.source, original_filename=document.original_filename,
             converted_from_docx=document.status == "converted_from_docx", size_bytes=document.size_bytes,
             uploaded_at=document.created_at, stage=application.stage, rejection_action=application.rejection_action,
             rejection_reason=application.rejection_reason, rejected_from_stage=application.rejected_from_stage,

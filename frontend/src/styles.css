@@ -279,12 +279,78 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
 .decision-modal input[type="number"] { width: 92px; text-align: right; }
 .decision-modal .actions { justify-content: flex-end; margin-top: 5px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.interviews-page, .interview-room-page { display: grid; gap: 18px; }
+.interviews-layout { display: grid; grid-template-columns: minmax(290px, .38fr) minmax(0, .62fr); gap: 18px; align-items: start; }
+.interview-scheduler { position: sticky; top: 86px; }
+.interview-scheduler h2, .interview-sessions h2, .interview-questions h2 { margin: 0 0 12px; font-size: 1.15rem; }
+.interview-scheduler form, .interview-scheduler label { display: grid; gap: 8px; }
+.interview-scheduler form { gap: 14px; }
+.interview-scheduler input, .interview-scheduler select { width: 100%; }
+.interview-sessions { display: grid; gap: 12px; }
+.interview-session-card { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+.interview-session-card h3 { margin: 4px 0; }
+.interview-session-card p { margin: 3px 0; }
+.interview-session-card .candidate-actions { flex-wrap: wrap; justify-content: flex-end; }
+.interview-session-card a.button { display: inline-flex; align-items: center; padding: 9px 14px; border-radius: 8px; background: var(--accent); color: white; text-decoration: none; font-weight: 650; }
+.interview-room-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(300px, 2fr); gap: 16px; align-items: start; }
+.interview-main, .interview-side { display: grid; gap: 16px; min-width: 0; }
+.interview-stage { padding: 12px; }
+.interview-waiting { display: grid; place-items: center; gap: 13px; min-height: 350px; text-align: center; }
+.interview-waiting h2 { margin: 0; }
+.interview-consent { display: flex; align-items: flex-start; gap: 9px; max-width: 650px; line-height: 1.5; }
+.interview-consent input { flex: none; margin-top: 4px; }
+.interview-call { display: grid; grid-template-columns: 1fr 155px; grid-template-rows: minmax(280px, 38vw) auto; gap: 10px; }
+.interview-video { position: relative; display: grid; place-items: center; min-width: 0; overflow: hidden; border-radius: 12px; background: #172536; color: #dbe7f4; }
+.interview-video.remote { grid-column: 1 / 3; grid-row: 1; }
+.interview-video.local { z-index: 1; grid-column: 2; grid-row: 1; align-self: end; height: min(145px, 30%); margin: 10px; border: 2px solid #fff9; box-shadow: 0 12px 32px #0007; }
+.interview-video video { width: 100%; height: 100%; object-fit: cover; }
+.interview-video audio { display: none; }
+.interview-remote-audio { display: none; }
+.interview-controls { grid-column: 1 / 3; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.interview-controls .muted { margin-right: auto; font-size: .83rem; }
+.interview-call > .error { grid-column: 1 / 3; }
+.interview-live-badge { padding: 8px 12px; border-radius: 99px; background: #e7f8ed; color: #087f45; font-weight: 700; }
+.interview-transcript-card { padding: 0; overflow: hidden; }
+.interview-tabs { display: flex; border-bottom: 1px solid var(--border); }
+.interview-tabs button { border: 0; border-radius: 0; background: transparent; color: var(--muted); }
+.interview-tabs button.active { border-bottom: 2px solid var(--accent); color: var(--accent); }
+.interview-turns { display: grid; gap: 14px; max-height: 380px; overflow: auto; padding: 18px; }
+.interview-turn { border-left: 3px solid var(--accent); padding-left: 12px; }
+.interview-turn.candidate { border-color: #9261d4; }
+.interview-turn time { margin-left: 10px; color: var(--muted); font-size: .78rem; }
+.interview-turn p { margin: 5px 0 0; line-height: 1.5; }
+.interview-assistant { display: grid; gap: 14px; padding: 18px; }
+.interview-assistant form { display: flex; gap: 8px; }
+.interview-assistant form input { flex: 1; }
+.interview-assistant-answer { white-space: pre-wrap; }
+.interview-candidate-info { max-height: 540px; overflow: auto; }
+.interview-profile-field { padding: 14px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.interview-profile-field h3 { margin: 0 0 8px; font-size: .9rem; color: var(--text); }
+.interview-profile-field p { margin: 0; color: var(--muted); font-size: .85rem; line-height: 1.55; }
+.interview-profile-field ul { margin: 0; padding-left: 19px; color: var(--muted); font-size: .85rem; line-height: 1.5; }
+.interview-profile-field li { margin-bottom: 9px; padding-left: 2px; }
+.interview-profile-field li::marker { color: var(--accent); }
+.interview-profile-field li strong { display: block; color: var(--text); }
+.interview-profile-detail { margin-top: 3px; }
+.interview-profile-detail b { color: var(--text); }
+.interview-questions-heading { display: flex; justify-content: space-between; gap: 12px; }
+.interview-question-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.interview-questions li { margin: 0 0 12px; line-height: 1.5; }
+.interview-question-edit { display: flex; align-items: start; gap: 6px; margin-bottom: 8px; }
+.interview-question-edit textarea { flex: 1; }
+.interview-guest-page { min-height: 100vh; padding: 26px; background: var(--bg); }
+.interview-guest-page header { display: flex; justify-content: space-between; margin: 0 auto 24px; max-width: 1100px; }
+.interview-guest-card { display: grid; gap: 12px; max-width: 1100px; margin: auto; }
+.interview-guest-card h1, .interview-guest-card p { margin: 0; }
+.interview-guest-card .interview-call { margin-top: 16px; }
 @media (max-width: 820px) {
   .jobs-layout { grid-template-columns: 1fr; }
   .upload-panel, .cv-preview { position: static; }
   .submissions-layout { grid-template-columns: 1fr; }
   .cv-preview { min-height: 55vh; }
   .candidate-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .interviews-layout, .interview-room-grid { grid-template-columns: 1fr; }
+  .interview-scheduler { position: static; }
 }
 @media (max-width: 560px) {
   .page-heading, .detail-heading, .submissions-heading { align-items: flex-start; flex-direction: column; }

@@ -21,6 +21,7 @@ from app.services.users import ensure_seed_interviewer
 from app.api.routers.chat import router as chat_router
 from app.api.routers.jobs import router as jobs_router
 from app.api.routers.candidates import router as candidates_router
+from app.api.routers.interviews import router as interviews_router
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.graph import register_job_graph
 from app.graphs.orchestrator import registry
@@ -83,6 +84,7 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(jobs_router)
 app.include_router(candidates_router)
+app.include_router(interviews_router)
 
 
 # Liveness endpoint used by Docker healthchecks.
