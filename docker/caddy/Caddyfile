@@ -1,0 +1,9 @@
+https://{$LAN_HOST}:8443 {
+    tls internal
+    reverse_proxy web:80
+}
+
+https://{$LAN_HOST}:8444 {
+    tls internal
+    reverse_proxy livekit:7880
+}
