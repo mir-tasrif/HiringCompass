@@ -4,7 +4,7 @@ HiringCompass is an AI-assisted recruitment platform that helps hiring teams rev
 
 ## Project status
 
-Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. CV upload, PDF text extraction with English OCR fallback, F11 integrity review, structured profile parsing, F1 requirement ranking, and recruiter review are available. Later scoring, interviews and assessments remain under development.
+Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. CV intake, F11 integrity review, parsing, F1 ranking, F2 scoring, and recruiter review are available. The interview and Groq Whisper transcription flow is implemented for local-network testing; assessment remains under development.
 
 ## Company knowledge for job descriptions
 
@@ -30,6 +30,12 @@ After parsing, select up to 20 CVs for **Feature 1 ranking**. Ranking compares e
 
 The worker runs as part of `docker compose up --build`. Progress and independent technical retries are stored in the database. In a linked job chat, explicitly name candidate labels (for example, `candidate001`) to start supported work. After parsing, the assistant asks before starting F1; human review decisions remain in the Candidates page.
 
+## Local video interviews
+
+F2-approved candidates appear in **Candidates → Selected for Interview**. Recruiters can schedule or reschedule a private interview, correct its invitation email, review generated questions, admit the candidate, and conduct a LiveKit video call. Each participant's microphone sends short, separate audio segments to Groq Whisper; only role-labeled transcript turns are saved. The recruiter can review saved turns and ask the private interview assistant for questions grounded in the job, CV, company knowledge, and conversation so far.
+
+For a same-Wi-Fi demonstration without certificate installation, start the temporary HTTPS interview tunnel described in [interviews-local-setup.md](docs/interviews-local-setup.md). The guide also covers the LAN-only certificate option.
+
 ## Solution overview
 
 The system uses six LangGraph workflows:
@@ -49,7 +55,7 @@ Each candidate workflow is isolated by job and candidate identifiers. CV batches
 - LangGraph for workflow orchestration
 - PostgreSQL for application data and workflow checkpoints
 - pgvector for retrieval where needed
-- WebRTC/managed RTC and Google Speech-to-Text for interview delivery and transcription
+- LiveKit WebRTC and Groq Whisper for interview delivery and transcription
 - Docker Compose for local development
 
 

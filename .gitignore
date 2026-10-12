@@ -35,3 +35,4 @@ htmlcov/
 # Local containers / database volumes
 postgres_data/
 pgdata/
+hiringcompass-local-root.crt
