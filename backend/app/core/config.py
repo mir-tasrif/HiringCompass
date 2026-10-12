@@ -104,7 +104,9 @@ class Settings(BaseSettings):
     rag_corpus_dir: Path = Path("/app/app/rag/corpora")
 
     # --- Speech-to-text (switchable) ---
-    stt_provider: Literal["faster_whisper", "google"] = "faster_whisper"
+    stt_provider: Literal["faster_whisper", "google", "groq"] = "groq"
+    groq_api_key: str = ""
+    groq_whisper_model: str = "whisper-large-v3-turbo"
     stt_language: str = "en-US"
     google_application_credentials: str = "/run/secrets/google_stt.json"
     google_stt_model: str = "latest_long"
@@ -128,6 +130,10 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_password: str = ""
     smtp_from: str = "hiring@hiringcompass.local"
+    interview_email: str = ""
+    interview_email_password: str = ""
+    interview_smtp_host: str = "smtp.gmail.com"
+    interview_smtp_port: int = 587
 
     # --- Worker ---
     worker_id: str = "worker-1"
