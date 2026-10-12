@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings
 from app.core.errors import PermanentError, TransientError
 from app.db.models import (Application, ApplicationEvent, Candidate, CandidateProfile, CandidateScreening,
-                           ChatMessage, ChatThread, CvBatch, CvBatchItem, Document, Job, JobVersion)
+                           CandidateScore, F2ScoringPolicy, ChatMessage, ChatThread, CvBatch, CvBatchItem, Document, Job, JobVersion)
+from app.graphs.f2_scoring.graph import SCORING_VERSION
 from app.rag.store import KnowledgeStore
 from app.llm.structured import UNTRUSTED_NOTICE, wrap_untrusted
 from app.services.cv_pipeline import (CvExtractionFailure, _safe_path, extract_pdf_text, inspect_integrity,
@@ -32,6 +34,8 @@ def _retry_delay_seconds(settings: Settings, attempts: int, error: Exception) ->
                 settings.worker_backoff_base_seconds * (2 ** min(max(attempts - 1, 0), 10)))
     if isinstance(error, TransientError) and error.retry_after_seconds is not None:
         delay = min(settings.worker_backoff_max_seconds, max(delay, int(error.retry_after_seconds)))
+    if isinstance(error, TransientError) and "HTTP 429" in str(error):
+        delay = max(delay, min(settings.worker_backoff_max_seconds, 60 * attempts))
     return delay
 
 
@@ -103,7 +107,7 @@ async def _mark_item_for_current_stage(session_factory: async_sessionmaker[Async
         if application is None or application.stage == "rejected":
             item.status = "rejected"
             item.error = "The CV was rejected while processing was in progress."
-        elif application.stage in {"parsed", "f1_review", "scoring", "screened_out"}:
+        elif application.stage in {"parsed", "f1_review", "scoring", "f2_review", "interview_selection", "screened_out"}:
             item.status, item.error = "completed", None
         else:
             item.status, item.error = "failed", "The candidate moved to another stage while processing was in progress."
@@ -191,6 +195,13 @@ async def _notify_chat_completion(session: AsyncSession, batch: CvBatch) -> None
                    "I’ll leave the recruiter decision to you.")
         payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=review",
                    "job_id": str(job.id), "job_code": job.public_code, "kind": "review"}
+    elif batch.kind == "scoring":
+        failed = sum(item.status == "failed" for item in items)
+        completed = sum(item.status == "completed" for item in items)
+        message = (f"Feature 2 scoring finished for {completed} CV(s) under {job.public_code}. "
+                   f"Scores and evidence are ready for recruiter decisions in Review; {failed} CV(s) need a technical retry.")
+        payload = {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=review",
+                   "job_id": str(job.id), "job_code": job.public_code, "kind": "review"}
     else:
         return
     session.add(ChatMessage(thread_id=batch.thread_id, role="assistant", content=message, payload=payload))
@@ -212,7 +223,7 @@ async def _recompute_job_ranks(session: AsyncSession, job_id: uuid.UUID) -> None
         mandatory_eligible = all(requirement.get("status") in {"met", "partially_met"}
                                  for requirement in mandatory_requirements)
         screening.mandatory_pass = mandatory_eligible
-        if mandatory_eligible and application.stage in {"f1_review", "scoring"}:
+        if mandatory_eligible and application.stage in {"f1_review", "scoring", "scoring_processing", "f2_review", "interview_selection"}:
             eligible.append((screening, application))
         else:
             screening.rank = None
@@ -403,15 +414,81 @@ async def process_ranking_item(session_factory: async_sessionmaker[AsyncSession]
         await _finalize_batch(session_factory, batch_id)
 
 
+async def process_scoring_item(session_factory: async_sessionmaker[AsyncSession], settings: Settings,
+                               graph: Any, item_id: uuid.UUID) -> None:
+    async with session_factory() as session:
+        item = await session.get(CvBatchItem, item_id)
+        if item is None:
+            return
+        application = await session.get(Application, item.application_id)
+        if application is None:
+            raise PermanentError("The CV application no longer exists.")
+        if application.stage != "scoring_processing":
+            await session.rollback()
+            await _mark_item_for_current_stage(session_factory, item_id)
+            return
+        existing = await session.scalar(select(CandidateScore).where(CandidateScore.batch_item_id == item.id))
+        batch = await session.get(CvBatch, item.batch_id)
+        policy = await session.get(F2ScoringPolicy, batch.scoring_policy_id) if batch and batch.scoring_policy_id else None
+        profile = await _profile_for(session, application.id)
+        version = await session.scalar(select(JobVersion).where(JobVersion.job_id == application.job_id,
+            JobVersion.version == application.job_version))
+        if policy is None or profile is None or not profile.profile or version is None:
+            raise PermanentError("F2 needs a saved job profile, parsed CV, and confirmed scoring policy.")
+        if existing is None:
+            # Most CVs fit in this bound; smaller requests avoid remote token-window exhaustion.
+            cv_text = profile.extracted_text[:20_000]
+            digest = hashlib.sha256(json.dumps({"cv": cv_text, "profile": profile.profile,
+                "job": version.profile, "weights": policy.weights, "version": SCORING_VERSION,
+                "model": settings.llm_model},
+                sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            state = {"job_profile": version.profile, "candidate_profile": profile.profile,
+                     "cv_text": cv_text, "weights": policy.weights, "input_hash": digest}
+            config = {"configurable": {"thread_id": f"f2:{item.id}"}}
+            previous = await session.scalar(select(CandidateScore).where(CandidateScore.application_id == application.id,
+                CandidateScore.input_hash == digest, CandidateScore.model_name == settings.llm_model)
+                .order_by(CandidateScore.created_at.desc()).limit(1))
+            if previous:
+                result = {"dimensions": previous.dimensions, "aggregate_score": previous.aggregate_score}
+            else:
+                checkpoint = await graph.aget_state(config)
+                saved_state = checkpoint.values or {}
+                if saved_state.get("input_hash") == digest and saved_state.get("aggregate_score") is not None and not checkpoint.next:
+                    result = saved_state
+                else:
+                    result = await graph.ainvoke(state, config)
+        current = await session.scalar(select(Application).where(Application.id == application.id)
+            .with_for_update().execution_options(populate_existing=True))
+        if current is None or current.stage != "scoring_processing":
+            raise CandidateStageChanged()
+        if existing is None:
+            session.add(CandidateScore(application_id=application.id, batch_item_id=item.id, policy_id=policy.id,
+                policy_version=policy.version, weights=policy.weights.copy(), dimensions=result["dimensions"],
+                aggregate_score=result["aggregate_score"], model_name=settings.llm_model,
+                scoring_version=SCORING_VERSION, input_hash=digest))
+        await _event(session, current, None, "f2_scored", "f2_review",
+                     f"F2 score {result['aggregate_score'] if existing is None else existing.aggregate_score}/100; awaiting recruiter interview-selection decision.")
+        item.status, item.error, item.lease_expires_at = "completed", None, None
+        await refresh_batch_status(session, item.batch_id)
+        batch_id = item.batch_id
+        await session.commit()
+        await _finalize_batch(session_factory, batch_id)
+
+
 async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], settings: Settings,
-                         llm: Any, store: KnowledgeStore) -> bool:
+                         llm: Any, store: KnowledgeStore, scoring_graph: Any | None = None,
+                         allowed_kinds: set[str] | None = None) -> bool:
     """Claim and process one durable CV task; expired leases make interrupted tasks recoverable."""
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
-        item = await session.scalar(select(CvBatchItem).where(
+        claim = select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id).where(
             ((CvBatchItem.status == "queued") & ((CvBatchItem.next_attempt_at.is_(None)) | (CvBatchItem.next_attempt_at <= now))) |
             ((CvBatchItem.status == "processing") & (CvBatchItem.lease_expires_at < now))
-        ).order_by(CvBatchItem.created_at).with_for_update(skip_locked=True).limit(1))
+        )
+        if allowed_kinds is not None:
+            claim = claim.where(CvBatch.kind.in_(allowed_kinds))
+        item = await session.scalar(claim.order_by(CvBatchItem.created_at)
+            .with_for_update(of=CvBatchItem, skip_locked=True).limit(1))
         if item is None:
             unfinished = list(await session.scalars(select(CvBatch.id).where(
                 CvBatch.status.in_(["completed", "completed_with_errors"]), CvBatch.completion_notified.is_(False)
@@ -438,6 +515,8 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
             await process_intake_item(session_factory, settings, llm, item_id)
         elif kind == "ranking":
             await process_ranking_item(session_factory, settings, llm, store, item_id)
+        elif kind == "scoring" and scoring_graph is not None:
+            await process_scoring_item(session_factory, settings, scoring_graph, item_id)
         else:
             raise PermanentError("Unknown CV batch operation.")
     except CandidateStageChanged:
@@ -489,7 +568,9 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
                     item.status, item.error, item.next_attempt_at = "rejected", "The CV was rejected while processing was in progress.", None
                 else:
                     item.error = str(exc)[:2000]
-                    if item.attempts < settings.worker_max_attempts:
+                    batch = await session.get(CvBatch, item.batch_id)
+                    max_attempts = max(settings.worker_max_attempts, 6) if batch and batch.kind == "scoring" and isinstance(exc, TransientError) else settings.worker_max_attempts
+                    if item.attempts < max_attempts:
                         delay = _retry_delay_seconds(settings, item.attempts, exc)
                         item.status = "queued"
                         item.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
@@ -503,11 +584,11 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
 
 
 async def run_cv_worker(session_factory: async_sessionmaker[AsyncSession], settings: Settings,
-                        llm: Any, store: KnowledgeStore) -> None:
-    async def consume() -> None:
+                        llm: Any, store: KnowledgeStore, scoring_graph: Any | None = None) -> None:
+    async def consume(allowed_kinds: set[str] | None = None) -> None:
         while True:
             try:
-                worked = await cv_worker_once(session_factory, settings, llm, store)
+                worked = await cv_worker_once(session_factory, settings, llm, store, scoring_graph, allowed_kinds)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -515,5 +596,9 @@ async def run_cv_worker(session_factory: async_sessionmaker[AsyncSession], setti
             if not worked:
                 await asyncio.sleep(settings.worker_poll_seconds)
 
-    await asyncio.gather(*(consume() for _ in range(settings.worker_max_concurrency)))
+    if scoring_graph is not None and settings.worker_max_concurrency > 1:
+        await asyncio.gather(consume({"scoring"}),
+            *(consume({"integrity_parse", "ranking"}) for _ in range(settings.worker_max_concurrency - 1)))
+    else:
+        await asyncio.gather(*(consume() for _ in range(settings.worker_max_concurrency)))
 
