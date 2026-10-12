@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -29,6 +30,9 @@ class LLMClient:
         self._chat_http = httpx.AsyncClient(base_url=s.llm_base_url, headers=headers, timeout=s.llm_timeout_seconds, transport=transport)
         self._embed_http = httpx.AsyncClient(base_url=s.embedding_base_url, timeout=s.llm_timeout_seconds, transport=transport)
         self._slots = asyncio.Semaphore(s.llm_max_concurrency)
+        # Remote providers commonly enforce a shared request/token window; queue chat calls locally.
+        self._chat_slots = asyncio.Semaphore(1 if s.llm_profile == "remote" else s.llm_max_concurrency)
+        self._chat_cooldown_until = 0.0
 
     # Close both HTTP connection pools.
     async def aclose(self) -> None:
@@ -40,7 +44,16 @@ class LLMClient:
                        payload: dict[str, Any] | None = None, *, service: str = "AI service") -> dict[str, Any]:
         try:
             async with self._slots:
-                response = await http.request(method, path, json=payload)
+                if http is self._chat_http:
+                    async with self._chat_slots:
+                        wait = self._chat_cooldown_until - time.monotonic()
+                        if wait > 0:
+                            await asyncio.sleep(wait)
+                        response = await http.request(method, path, json=payload)
+                        if response.status_code == 429:
+                            self._chat_cooldown_until = max(self._chat_cooldown_until, time.monotonic() + 60)
+                else:
+                    response = await http.request(method, path, json=payload)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise TransientError(f"The {service} is unreachable or timed out.") from exc
         if response.status_code == 429 or response.status_code >= 500:
@@ -54,8 +67,23 @@ class LLMClient:
                         retry_seconds = max(0.0, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
                     except (TypeError, ValueError, OverflowError):
                         pass
+            if response.status_code == 429:
+                if retry_seconds is None:
+                    try:
+                        body = response.json()
+                        detail = str(body.get("error", body)) if isinstance(body, dict) else str(body)
+                        match = re.search(r"(?:try again|retry)\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds?|m|min|minutes?)\b", detail, re.I)
+                        if match:
+                            value = float(match.group(1))
+                            unit = match.group(2).lower()
+                            retry_seconds = value / 1000 if unit == "ms" else value * 60 if unit.startswith("m") else value
+                    except (ValueError, TypeError):
+                        pass
+                cooldown_seconds = min(self._settings.worker_backoff_max_seconds, max(60.0, retry_seconds or 0.0))
+                if http is self._chat_http:
+                    self._chat_cooldown_until = max(self._chat_cooldown_until, time.monotonic() + cooldown_seconds)
             raise TransientError(f"The {service} is busy (HTTP {response.status_code}).",
-                                 retry_after_seconds=retry_seconds)
+                                 retry_after_seconds=retry_seconds if retry_seconds is not None else (cooldown_seconds if response.status_code == 429 else None))
         if response.status_code in (401, 403):
             raise PermanentError("The AI service rejected the API key.")
         if response.status_code >= 400:

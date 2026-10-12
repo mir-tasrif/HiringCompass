@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.models import Application, ApplicationEvent, Approval, ChatMessage, ChatThread, CvBatch, CvBatchItem, Job, JobPosting
+from app.services.f2_batches import start_f2_batch
+from app.services.f2_policy import suggested_weights, validate_weights
 
 from app.core.errors import AppError, ApprovalError, ConflictError, NotFoundError
 from app.core.logging import get_logger, log_exception
@@ -224,6 +226,11 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
         return confirmation
+    scoring_work = await _handle_scoring_work_request(session, thread, last_user.content, messages)
+    if scoring_work is not None:
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return scoring_work
     cv_work = await _handle_candidate_work_request(session, thread, last_user.content, messages)
     if cv_work is not None:
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
@@ -393,14 +400,87 @@ async def _handle_candidate_work_request(session: AsyncSession, thread: ChatThre
              "kind": "integrity" if integrity_request else "ranking"})
 
 
+async def _handle_scoring_work_request(session: AsyncSession, thread: ChatThread,
+                                       message: str, messages: list[ChatMessage] | None = None) -> tuple[str, dict[str, Any]] | None:
+    lowered = message.lower()
+    previous = next((m for m in reversed((messages or [])[:-1]) if m.role == "assistant"), None)
+    prior_payload = previous.payload or {} if previous else {}
+    continuing = prior_payload.get("kind") == "scoring" and bool(re.search(r"\b(?:all|every|available|candidate\s*\d+)\b", lowered))
+    explicit = bool(re.search(r"\b(?:f2|feature\s*2|scor(?:e|ing))\b", lowered) and
+                    re.search(r"\b(?:start|run|calculate|score|scoring|process)\b", lowered))
+    if not (explicit or continuing):
+        return None
+    job = await jobs.get_job(session, thread.job_id) if thread.job_id else None
+    route = f"/candidates?jobId={job.id}&section=scoring" if job else "/candidates?section=scoring"
+    if job is None or job.active_version is None or job.archived_at is not None:
+        return "Open an active approved job chat before starting F2 scoring.", {"type": "candidate_work", "route": route}
+    labels = sorted({int(n) for n in re.findall(r"\bcandidate\s*0*(\d{1,6})\b", lowered)})
+    all_requested = bool(re.search(r"\b(?:all|every|available)\b", lowered))
+    if not labels and not all_requested:
+        return (f"Which F2-ready CVs under {job.public_code} should I score? Name candidate labels or say ‘all F2-ready CVs’ (up to 20).",
+                {"type": "candidate_work", "route": route, "kind": "scoring"})
+    if len(labels) > 20:
+        return "Select at most 20 F2-ready CVs for one batch.", {"type": "candidate_work", "route": route}
+    query = select(Application).where(Application.job_id == job.id, Application.stage == "scoring")
+    if labels:
+        query = query.where(Application.candidate_number.in_(labels))
+    applications = list(await session.scalars(query.order_by(Application.candidate_number).limit(21)))
+    if len(applications) > 20 or (labels and len(applications) != len(labels)) or not applications:
+        return ("I could not match that selection to 1–20 F2-ready CVs. Check Feature 2 Scoring for eligible candidates.",
+                {"type": "candidate_work", "route": route})
+    weights, policy_version = await suggested_weights(session, job)
+    summary = ", ".join(f"{key.replace('_', ' ')} {value}%" for key, value in weights.items())
+    return (f"I found {len(applications)} F2-ready CV(s) under {job.public_code}. Suggested scoring weights: {summary}. "
+            "Reply ‘confirm F2’ to use them, give four weights such as ‘technical 40, experience 30, certifications 10, education 20’, "
+            "or edit them in Candidates before starting the batch.",
+            {"type": "candidate_work", "route": route, "kind": "scoring", "awaiting_confirmation": "scoring",
+             "application_ids": [str(app.id) for app in applications], "weights": weights,
+             "policy_version": policy_version, "job_id": str(job.id), "job_code": job.public_code})
+
+
 async def _confirm_candidate_work(session: AsyncSession, thread: ChatThread, messages: list[ChatMessage],
                                   simple: str) -> tuple[str, dict[str, Any]] | None:
     """Continue the exact parsed-CV selection from a prior assistant offer after explicit recruiter confirmation."""
     affirmative = simple in {"yes", "yes please", "sure", "go ahead", "proceed", "please proceed", "start it", "start ranking"}
-    if not affirmative:
-        return None
     previous = next((message for message in reversed(messages[:-1]) if message.role == "assistant"), None)
     payload = (previous.payload or {}) if previous else {}
+    if payload.get("awaiting_confirmation") == "scoring" and simple not in {"confirm f2", "confirm scoring", "use these weights", "yes", "proceed"}:
+        aliases = {"technical_projects": r"technical(?:\s+skills)?|projects?",
+                   "relevant_experience": r"experience",
+                   "certifications_soft_skills": r"certifications?|soft\s+skills?",
+                   "education_qualifications": r"education|qualifications?"}
+        found: dict[str, int] = {}
+        for key, alias in aliases.items():
+            match = re.search(rf"\b(?:{alias})\b\s*[:=]?\s*(\d{{1,3}})\s*%?", simple)
+            if match:
+                found[key] = int(match.group(1))
+        if found:
+            updated = {**payload.get("weights", {}), **found}
+            try:
+                validate_weights(updated)
+            except ValueError as exc:
+                return f"{exc} Please give all four percentages or adjust the suggested weights.", payload
+            summary = ", ".join(f"{key.replace('_', ' ')} {value}%" for key, value in updated.items())
+            return f"Updated F2 weights: {summary}. Reply ‘confirm F2’ to start the selected CVs.", {**payload, "weights": updated}
+    if payload.get("awaiting_confirmation") == "scoring" and simple in {"confirm f2", "confirm scoring", "use these weights", "yes", "proceed"}:
+        try:
+            ids = [uuid.UUID(value) for value in payload["application_ids"]]
+            weights = payload["weights"]
+            job_id = uuid.UUID(payload["job_id"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return "The F2 selection expired. Please select the CVs again.", {"type": "text"}
+        if thread.job_id != job_id:
+            return "This chat is no longer linked to that job. Select the CVs again.", {"type": "text"}
+        job = await session.get(Job, job_id)
+        if job is None or job.archived_at is not None or job.active_version is None:
+            return "This job is no longer active.", {"type": "text"}
+        batch = await start_f2_batch(session, owner_id=thread.owner_id, application_ids=ids,
+                                     weights=weights, thread_id=thread.id)
+        return (f"F2 scoring started for {len(ids)} CV(s) under {job.public_code}. I’ll link you to Review when scores are ready.",
+                {"type": "candidate_work", "route": f"/candidates?jobId={job.id}&section=scoring",
+                 "kind": "scoring", "job_id": str(job.id), "batch_id": str(batch.id)})
+    if not affirmative:
+        return None
     if payload.get("type") != "candidate_work" or payload.get("awaiting_confirmation") != "ranking":
         return None
     try:
@@ -486,6 +566,9 @@ async def _job_activity_context(
                 "ranking": stage_counts.get("ranking", 0),
                 "f1_review": stage_counts.get("f1_review", 0),
                 "scoring": stage_counts.get("scoring", 0),
+                "scoring_processing": stage_counts.get("scoring_processing", 0),
+                "f2_review": stage_counts.get("f2_review", 0),
+                "interview_selection": stage_counts.get("interview_selection", 0),
                 "rejected": stage_counts.get("rejected", 0),
             },
             "posting_status": posting_status,
