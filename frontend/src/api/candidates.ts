@@ -32,9 +32,14 @@ export interface CandidateCv {
   integrity_signals: { code: string; severity: string; evidence: string; page?: number }[];
   extraction_method: string | null;
   screening: { suitability_score: number; mandatory_pass: boolean; requirements: { text: string; kind: string; status: string; evidence: string; explanation: string }[]; explanation: string; rank: number | null } | null;
+  scoring: { aggregate_score: number; dimensions: { key: string; score: number; evidence: string; justification: string; missing: boolean }[]; weights: Record<string, number>; policy_version: number; model_name: string; scored_at: string } | null;
   integrity_task_id: string | null;
   integrity_task_status: string | null;
   integrity_task_error: string | null;
+  scoring_task_id: string | null;
+  scoring_task_status: string | null;
+  scoring_task_error: string | null;
+  scoring_task_next_attempt_at: string | null;
 }
 
 export type CandidateAction = "delete" | "reject" | "permanent_delete";
@@ -50,7 +55,7 @@ export interface CvBatch {
   failed: number;
   waiting_review: number;
   rejected: number;
-  items: { id: string; application_id: string; status: string; attempts: number; error: string | null }[];
+  items: { id: string; application_id: string; status: string; attempts: number; error: string | null; next_attempt_at: string | null }[];
 }
 
 export const listCandidateCvs = (section: CandidateSection): Promise<CandidateCv[]> =>
@@ -59,9 +64,15 @@ export const listCandidateCvs = (section: CandidateSection): Promise<CandidateCv
 export const startCvBatch = (applicationIds: string[], kind: "integrity" | "ranking"): Promise<{ batches: CvBatch[] }> =>
   apiFetch(`/candidates/batches/${kind}`, { method: "POST", body: JSON.stringify({ application_ids: applicationIds }) });
 
+export const getF2Weights = (jobId: string): Promise<{ job_id: string; job_code: string; weights: Record<string, number>; policy_version: number | null }> =>
+  apiFetch(`/candidates/scoring-weights/${jobId}`);
+
+export const startF2Batch = (applicationIds: string[], weights: Record<string, number>, rescore = false): Promise<{ batches: CvBatch[] }> =>
+  apiFetch("/candidates/batches/scoring", { method: "POST", body: JSON.stringify({ application_ids: applicationIds, weights, rescore }) });
+
 export const listActiveCvBatches = (): Promise<CvBatch[]> => apiFetch("/candidates/batches");
 export const getCvBatch = (batchId: string): Promise<CvBatch> => apiFetch(`/candidates/batches/${batchId}`);
-export const retryCvBatchItem = (itemId: string): Promise<{ id: string; status: string }> =>
+export const retryCvBatchItem = (itemId: string): Promise<{ id: string; batch_id: string; status: string }> =>
   apiFetch(`/candidates/batch-items/${itemId}/retry`, { method: "POST" });
 export const decideCandidateReview = (applicationId: string, decision: "approve" | "reject", reason: string): Promise<{ application_id: string; stage: string; decision: string }> =>
   apiFetch(`/candidates/${applicationId}/review`, { method: "POST", body: JSON.stringify({ decision, reason }) });
