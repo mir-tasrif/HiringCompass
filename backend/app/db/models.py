@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
@@ -108,6 +108,7 @@ class CvBatch(Base, IdMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
     total: Mapped[int] = mapped_column(Integer)
     auto_start_ranking: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    scoring_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("f2_scoring_policies.id", ondelete="SET NULL"), nullable=True)
     completion_notified: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
 
 
@@ -157,6 +158,33 @@ class CandidateScreening(Base, IdMixin, TimestampMixin):
     requirements: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     explanation: Mapped[str] = mapped_column(Text)
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class F2ScoringPolicy(Base, IdMixin, TimestampMixin):
+    __tablename__ = "f2_scoring_policies"
+    __table_args__ = (UniqueConstraint("job_id", "version", name="uq_f2_policy_job_version"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    weights: Mapped[dict[str, int]] = mapped_column(JSONB)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+
+
+class CandidateScore(Base, IdMixin, TimestampMixin):
+    __tablename__ = "candidate_scores"
+    __table_args__ = (UniqueConstraint("batch_item_id", name="uq_candidate_scores_batch_item"),
+                       Index("ix_candidate_scores_application_created", "application_id", "created_at"))
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    batch_item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cv_batch_items.id", ondelete="CASCADE"))
+    policy_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("f2_scoring_policies.id", ondelete="CASCADE"))
+    policy_version: Mapped[int] = mapped_column(Integer)
+    weights: Mapped[dict[str, int]] = mapped_column(JSONB)
+    dimensions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    aggregate_score: Mapped[float] = mapped_column(Float)
+    model_name: Mapped[str] = mapped_column(String(120))
+    scoring_version: Mapped[str] = mapped_column(String(30))
+    input_hash: Mapped[str] = mapped_column(String(64))
 
 
 # Append-only stage and rejection history for each application.

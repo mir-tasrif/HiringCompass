@@ -15,8 +15,10 @@ from app.api.deps import get_current_interviewer
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db.models import (Application, ApplicationEvent, AuditEvent, Candidate, CandidateProfile, CandidateScreening,
-                           CvBatch, CvBatchItem, Document, Job, User)
+                           CandidateScore, CvBatch, CvBatchItem, Document, Job, User)
 from app.db.session import SessionLocal, get_session
+from app.services.f2_batches import start_f2_batch
+from app.services.f2_policy import suggested_weights
 from app.services.cv_tasks import _event, _finalize_batch, _recompute_job_ranks, refresh_batch_status
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
@@ -55,9 +57,14 @@ class CandidateCvOut(BaseModel):
     integrity_signals: list[dict] = Field(default_factory=list)
     extraction_method: str | None = None
     screening: dict | None = None
+    scoring: dict | None = None
     integrity_task_id: uuid.UUID | None = None
     integrity_task_status: str | None = None
     integrity_task_error: str | None = None
+    scoring_task_id: uuid.UUID | None = None
+    scoring_task_status: str | None = None
+    scoring_task_error: str | None = None
+    scoring_task_next_attempt_at: datetime | None = None
 
 
 class CandidateActionBody(BaseModel):
@@ -74,12 +81,25 @@ class StartBatchBody(BaseModel):
     application_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
 
 
+class StartScoringBody(StartBatchBody):
+    weights: dict[str, int]
+    rescore: bool = False
+
+
+class ScoringWeightsOut(BaseModel):
+    job_id: uuid.UUID
+    job_code: str
+    weights: dict[str, int]
+    policy_version: int | None
+
+
 class BatchItemOut(BaseModel):
     id: uuid.UUID
     application_id: uuid.UUID
     status: str
     attempts: int
     error: str | None
+    next_attempt_at: datetime | None
 
 
 class BatchOut(BaseModel):
@@ -101,6 +121,7 @@ class StartBatchesOut(BaseModel):
 
 class RetryOut(BaseModel):
     id: uuid.UUID
+    batch_id: uuid.UUID
     status: str
 
 
@@ -122,7 +143,7 @@ def _batch_out(batch: CvBatch, items: list[CvBatchItem]) -> BatchOut:
         waiting_review=sum(item.status == "waiting_review" for item in items),
         rejected=sum(item.status == "rejected" for item in items),
         items=[BatchItemOut(id=item.id, application_id=item.application_id, status=item.status,
-                            attempts=item.attempts, error=item.error) for item in items])
+                            attempts=item.attempts, error=item.error, next_attempt_at=item.next_attempt_at) for item in items])
 
 
 @router.get("", response_model=list[CandidateCvOut])
@@ -153,9 +174,9 @@ async def list_candidate_cvs(
     elif section == "ranking":
         statement = statement.where(CandidateScreening.id.is_not(None), CandidateScreening.mandatory_pass.is_(True))
     elif section == "scoring":
-        statement = statement.where(Application.stage == "scoring")
+        statement = statement.where(Application.stage.in_(["scoring", "scoring_processing", "f2_review", "interview_selection"]))
     elif section == "review":
-        statement = statement.where(Application.stage.in_(["integrity_review", "f1_review"]))
+        statement = statement.where(Application.stage.in_(["integrity_review", "f1_review", "f2_review"]))
     elif section == "rejected":
         statement = statement.where(Application.stage == "rejected")
     else:
@@ -178,6 +199,17 @@ async def list_candidate_cvs(
     integrity_tasks: dict[uuid.UUID, CvBatchItem] = {}
     for task in task_rows:
         integrity_tasks.setdefault(task.application_id, task)
+    scoring_rows = (await session.execute(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
+                    .where(CvBatchItem.application_id.in_(ids), CvBatch.kind == "scoring")
+                    .order_by(CvBatchItem.created_at.desc(), CvBatchItem.id.desc()))).scalars().all()
+    scoring_tasks: dict[uuid.UUID, CvBatchItem] = {}
+    for task in scoring_rows:
+        scoring_tasks.setdefault(task.application_id, task)
+    score_rows = list(await session.scalars(select(CandidateScore).where(CandidateScore.application_id.in_(ids))
+        .order_by(CandidateScore.created_at.desc(), CandidateScore.id.desc())))
+    current_scores: dict[uuid.UUID, CandidateScore] = {}
+    for score in score_rows:
+        current_scores.setdefault(score.application_id, score)
     events: dict[uuid.UUID, list[CandidateEventOut]] = {}
     for event in event_rows:
         events.setdefault(event.application_id, []).append(CandidateEventOut(action=event.action,
@@ -199,9 +231,20 @@ async def list_candidate_cvs(
             integrity_verdict=parsed.integrity_verdict if parsed else None,
             integrity_signals=parsed.integrity_signals if parsed else [],
             extraction_method=parsed.extraction_method if parsed else None, screening=screening_data,
+            scoring=({"aggregate_score": current_scores[application.id].aggregate_score,
+                      "dimensions": current_scores[application.id].dimensions,
+                      "weights": current_scores[application.id].weights,
+                      "policy_version": current_scores[application.id].policy_version,
+                      "model_name": current_scores[application.id].model_name,
+                      "scored_at": current_scores[application.id].created_at.isoformat()}
+                     if application.id in current_scores else None),
             integrity_task_id=integrity_tasks[application.id].id if application.id in integrity_tasks else None,
             integrity_task_status=integrity_tasks[application.id].status if application.id in integrity_tasks else None,
-            integrity_task_error=integrity_tasks[application.id].error if application.id in integrity_tasks else None))
+            integrity_task_error=integrity_tasks[application.id].error if application.id in integrity_tasks else None,
+            scoring_task_id=scoring_tasks[application.id].id if application.id in scoring_tasks else None,
+            scoring_task_status=scoring_tasks[application.id].status if application.id in scoring_tasks else None,
+            scoring_task_error=scoring_tasks[application.id].error if application.id in scoring_tasks else None,
+            scoring_task_next_attempt_at=scoring_tasks[application.id].next_attempt_at if application.id in scoring_tasks else None))
     return result
 
 
@@ -247,11 +290,35 @@ async def start_ranking_batch(body: StartBatchBody, user: User = Depends(get_cur
     return await _start_batches(session, user, body, "ranking")
 
 
+@router.get("/scoring-weights/{job_id}", response_model=ScoringWeightsOut)
+async def get_scoring_weights(job_id: uuid.UUID, user: User = Depends(get_current_interviewer),
+                              session: AsyncSession = Depends(get_session)) -> ScoringWeightsOut:
+    job = await session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == user.id,
+        Job.archived_at.is_(None), Job.active_version.is_not(None)))
+    if job is None:
+        raise NotFoundError("Active job not found.")
+    weights, version = await suggested_weights(session, job)
+    return ScoringWeightsOut(job_id=job.id, job_code=job.public_code or "", weights=weights, policy_version=version)
+
+
+@router.post("/batches/scoring", response_model=StartBatchesOut, status_code=202)
+async def start_scoring_batch(body: StartScoringBody, user: User = Depends(get_current_interviewer),
+                              session: AsyncSession = Depends(get_session)) -> StartBatchesOut:
+    batch = await start_f2_batch(session, owner_id=user.id, application_ids=body.application_ids,
+                                 weights=body.weights, rescore=body.rescore)
+    items = list(await session.scalars(select(CvBatchItem).where(CvBatchItem.batch_id == batch.id)))
+    return StartBatchesOut(batches=[_batch_out(batch, items)])
+
+
 @router.get("/batches", response_model=list[BatchOut])
 async def list_active_batches(user: User = Depends(get_current_interviewer),
                              session: AsyncSession = Depends(get_session)) -> list[BatchOut]:
-    batches = list(await session.scalars(select(CvBatch).where(CvBatch.owner_id == user.id)
+    active = list(await session.scalars(select(CvBatch).where(
+        CvBatch.owner_id == user.id, CvBatch.status.in_(["queued", "processing", "waiting_review"]))
+        .order_by(CvBatch.created_at.desc())))
+    recent = list(await session.scalars(select(CvBatch).where(CvBatch.owner_id == user.id)
         .order_by(CvBatch.created_at.desc()).limit(20)))
+    batches = list({batch.id: batch for batch in [*active, *recent]}.values())
     output = []
     for batch in batches:
         items = list(await session.scalars(select(CvBatchItem).where(CvBatchItem.batch_id == batch.id)
@@ -287,7 +354,7 @@ async def retry_batch_item(item_id: uuid.UUID, user: User = Depends(get_current_
     if batch:
         batch.status, batch.completion_notified = "queued", False
     await session.commit()
-    return RetryOut(id=item.id, status=item.status)
+    return RetryOut(id=item.id, batch_id=item.batch_id, status=item.status)
 
 
 @router.post("/{application_id}/review", response_model=ReviewDecisionOut)
@@ -345,6 +412,19 @@ async def decide_candidate_review(application_id: uuid.UUID, body: ReviewDecisio
             await _event(session, application, user.id, "rejected", "rejected", reason)
             application.rejection_action, application.rejection_reason = "rejected", reason
             application.rejected_from_stage, application.rejected_at, application.rejected_by = "f1_review", datetime.now(timezone.utc), user.id
+            next_stage = "rejected"
+    elif application.stage == "f2_review":
+        score = await session.scalar(select(CandidateScore).where(CandidateScore.application_id == application.id)
+            .order_by(CandidateScore.created_at.desc()).limit(1))
+        if score is None:
+            raise HTTPException(status_code=409, detail="F2 score is missing.")
+        if body.decision == "approve":
+            await _event(session, application, user.id, "f2_approved", "interview_selection", actor_reason)
+            next_stage = "interview_selection"
+        else:
+            await _event(session, application, user.id, "rejected", "rejected", reason)
+            application.rejection_action, application.rejection_reason = "rejected", reason
+            application.rejected_from_stage, application.rejected_at, application.rejected_by = "f2_review", datetime.now(timezone.utc), user.id
             next_stage = "rejected"
     else:
         raise HTTPException(status_code=409, detail="This CV is not waiting for a recruiter decision.")
