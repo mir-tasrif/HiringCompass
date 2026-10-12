@@ -19,3 +19,11 @@ def test_provider_retry_after_is_respected_but_capped(tmp_path):
                         export_dir=tmp_path / "s/e", quarantine_dir=tmp_path / "s/q")
     assert _retry_delay_seconds(settings, 1, TransientError("busy", retry_after_seconds=23)) == 23
     assert _retry_delay_seconds(settings, 1, TransientError("busy", retry_after_seconds=100)) == 60
+
+
+def test_rate_limit_uses_longer_staggered_delay(tmp_path):
+    settings = Settings(_env_file=None, worker_backoff_base_seconds=5, worker_backoff_max_seconds=300,
+                        log_dir=tmp_path / "l", error_dir=tmp_path / "e", file_storage_dir=tmp_path / "s",
+                        export_dir=tmp_path / "s/e", quarantine_dir=tmp_path / "s/q")
+    assert _retry_delay_seconds(settings, 1, TransientError("The AI service is busy (HTTP 429).")) == 60
+    assert _retry_delay_seconds(settings, 2, TransientError("The AI service is busy (HTTP 429).")) == 120

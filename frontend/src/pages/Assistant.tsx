@@ -42,7 +42,7 @@ function JobUpdateCard({
             <li><strong>Status:</strong> {job.archived ? "Expired" : "Approved"} · Version {job.version}</li>
             <li><strong>Discord:</strong> {job.posting_status.replace(/_/g, " ")}</li>
             <li><strong>Uploaded CVs:</strong> {job.cv_submissions}</li>
-            {job.cv_pipeline && <li><strong>CV pipeline:</strong> {job.cv_pipeline.uploaded} uploaded · {job.cv_pipeline.integrity_check} checking · {job.cv_pipeline.integrity_review} integrity review · {job.cv_pipeline.parsed} parsed · {job.cv_pipeline.ranking} ranking · {job.cv_pipeline.f1_review} F1 review · {job.cv_pipeline.scoring} scoring · {job.cv_pipeline.rejected} rejected</li>}
+            {job.cv_pipeline && <li><strong>CV pipeline:</strong> {job.cv_pipeline.uploaded} uploaded · {job.cv_pipeline.integrity_check} checking · {job.cv_pipeline.integrity_review} integrity review · {job.cv_pipeline.parsed} parsed · {job.cv_pipeline.ranking} ranking · {job.cv_pipeline.f1_review} F1 review · {job.cv_pipeline.scoring} F2 ready · {job.cv_pipeline.scoring_processing ?? 0} scoring · {job.cv_pipeline.f2_review ?? 0} F2 review · {job.cv_pipeline.interview_selection ?? 0} selected for interview · {job.cv_pipeline.rejected} rejected</li>}
           </ul>
           <div className="posting-actions">
             {!job.archived && job.posting_status !== "posted" && <button type="button" disabled={!job.can_post || working || postingJobId !== null} onClick={() => onPost(job.job_id)}>
@@ -347,8 +347,9 @@ export default function Assistant() {
                     )}
                     {p?.type === "candidate_work" && <div className="posting-actions">
                       {p.awaiting_confirmation === "ranking" ? <button type="button" disabled={Boolean(working)} onClick={() => void send("yes")}>Start Feature 1 Ranking</button> : null}
+                      {p.awaiting_confirmation === "scoring" ? <button type="button" disabled={Boolean(working)} onClick={() => void send("confirm F2")}>Confirm weights and start F2</button> : null}
                       <Link className="button-link" to={p.route}>
-                        {p.review_required || p.kind === "review" ? "Open Review" : p.awaiting_confirmation === "ranking" ? "Review Parsed CVs" : p.kind === "ranking" ? "Open Feature 1 Ranking" : p.kind === "integrity" ? "Open Integrity Check" : "Select CVs in Candidates"}
+                        {p.review_required || p.kind === "review" ? "Open Review" : p.awaiting_confirmation === "ranking" ? "Review Parsed CVs" : p.kind === "ranking" ? "Open Feature 1 Ranking" : p.kind === "scoring" ? "Open Feature 2 Scoring" : p.kind === "integrity" ? "Open Integrity Check" : "Select CVs in Candidates"}
                       </Link>
                     </div>}
                   </Bubble>

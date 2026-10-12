@@ -23,6 +23,8 @@ services:
   # PostgreSQL 16 + pgvector: business data, work queue, LangGraph checkpoints, embeddings.
   db:
     image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
