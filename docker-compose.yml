@@ -97,6 +97,8 @@ services:
     command: ["--dev", "--bind", "0.0.0.0"]
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      NODE_IP: ${LAN_HOST:-}
+      UDP_PORT: 7882
     ports:
       - "7880:7880"
       - "7881:7881"
@@ -119,6 +121,34 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+
+  # HTTPS on the host's LAN address is required for camera and microphone permissions.
+  lan-gateway:
+    image: caddy:2
+    profiles: ["lan"]
+    environment:
+      LAN_HOST: ${LAN_HOST:-localhost}
+    ports:
+      - "8443:8443"
+      - "8444:8444"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - hc_caddy_data:/data
+      - hc_caddy_config:/config
+    depends_on:
+      - web
+      - livekit
+    restart: unless-stopped
+
+  # Temporary publicly trusted HTTPS address for local interview demonstrations.
+  # LiveKit media still connects directly over the shared Wi-Fi network.
+  interview-tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["interview-tunnel"]
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:80"]
+    depends_on:
+      - web
+    restart: unless-stopped
     
 # Named volumes: logs and errors are separate so each can be inspected, rotated or wiped independently.
 volumes:
@@ -127,3 +157,5 @@ volumes:
   hc_logs:
   hc_errors:
   hc_ollama:
+  hc_caddy_data:
+  hc_caddy_config:
