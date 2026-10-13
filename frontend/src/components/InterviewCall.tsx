@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { JoinCredentials, sendAudioSegment } from "../api/interviews";
 
@@ -10,9 +10,18 @@ interface Props {
   role: "candidate" | "interviewer";
   onEnd?: () => Promise<void>;
   onLeave: () => void;
+  onCallStateChange?: (state: { connection: string; mic: boolean; camera: boolean; ending: boolean }) => void;
 }
 
-export default function InterviewCall({ credentials, identity, role, onEnd, onLeave }: Props) {
+export interface InterviewCallHandle {
+  toggleMic: () => Promise<void>;
+  toggleCamera: () => Promise<void>;
+  leave: () => Promise<void>;
+  end: () => Promise<void>;
+}
+
+const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewCall(
+  { credentials, identity, role, onEnd, onLeave, onCallStateChange }: Props, ref) {
   const roomRef = useRef<Room | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingRequestedRef = useRef(false);
@@ -28,6 +37,11 @@ export default function InterviewCall({ credentials, identity, role, onEnd, onLe
   const [mic, setMic] = useState(true);
   const [camera, setCamera] = useState(true);
   const [transcriptionWarning, setTranscriptionWarning] = useState(false);
+  const [ending, setEnding] = useState(false);
+
+  useEffect(() => {
+    onCallStateChange?.({ connection, mic, camera, ending });
+  }, [connection, mic, camera, ending, onCallStateChange]);
 
   const flush = async () => {
     if (uploadingRef.current) return;
@@ -161,11 +175,18 @@ export default function InterviewCall({ credentials, identity, role, onEnd, onLe
     setCamera(next);
   };
   const end = async () => {
-    stopRecording();
-    await new Promise((resolve) => window.setTimeout(resolve, 600));
-    await flush();
-    if (onEnd) await onEnd();
-    roomRef.current?.disconnect();
+    if (ending) return;
+    setEnding(true);
+    try {
+      stopRecording();
+      await new Promise((resolve) => window.setTimeout(resolve, 600));
+      await flush();
+      if (onEnd) await onEnd();
+      roomRef.current?.disconnect();
+    } catch (error) {
+      setConnection(error instanceof Error ? error.message : "Could not end the interview. Try again.");
+      if (mic) beginRecording(roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack);
+    } finally { setEnding(false); }
   };
   const leave = async () => {
     stopRecording();
@@ -175,17 +196,21 @@ export default function InterviewCall({ credentials, identity, role, onEnd, onLe
     onLeave();
   };
 
+  useImperativeHandle(ref, () => ({ toggleMic, toggleCamera, leave, end }));
+
   return <div className="interview-call">
     <div className="interview-video remote" ref={remoteRef}><span>{role === "interviewer" ? "Waiting for candidate video" : "Waiting for interviewer video"}</span></div>
     <div className="interview-remote-audio" ref={remoteAudioRef} />
     <div className="interview-video local" ref={localRef}><span>Your camera</span></div>
-    <div className="interview-controls">
+    {role === "candidate" && <div className="interview-controls">
       <span className="muted" role="status">{connection}</span>
       <button type="button" className="secondary" onClick={() => void toggleMic()}>{mic ? "Mute" : "Unmute"}</button>
       <button type="button" className="secondary" onClick={() => void toggleCamera()}>{camera ? "Camera off" : "Camera on"}</button>
-      {onEnd && <button type="button" className="danger-button" onClick={() => void end()}>End interview</button>}
+      {onEnd && <button type="button" className="danger-button" disabled={ending} onClick={() => void end()}>{ending ? "Ending…" : "End interview"}</button>}
       <button type="button" className="secondary" onClick={() => void leave()}>{connection.startsWith("Disconnected") ? "Rejoin options" : "Leave call"}</button>
-    </div>
+    </div>}
     {transcriptionWarning && <p className="error" role="alert">Transcription is delayed. The call continues and queued audio retries while this page stays open. A long outage may leave a gap in the transcript.</p>}
   </div>;
-}
+});
+
+export default InterviewCall;
