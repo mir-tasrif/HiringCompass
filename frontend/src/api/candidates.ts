@@ -37,6 +37,10 @@ export interface CandidateCv {
   integrity_task_id: string | null;
   integrity_task_status: string | null;
   integrity_task_error: string | null;
+  ranking_task_id: string | null;
+  ranking_task_status: string | null;
+  ranking_task_error: string | null;
+  ranking_task_next_attempt_at: string | null;
   scoring_task_id: string | null;
   scoring_task_status: string | null;
   scoring_task_error: string | null;
@@ -56,7 +60,8 @@ export interface CvBatch {
   failed: number;
   waiting_review: number;
   rejected: number;
-  items: { id: string; application_id: string; status: string; attempts: number; error: string | null; next_attempt_at: string | null }[];
+  cancelled: number;
+  items: { id: string; application_id: string; status: string; attempts: number; error: string | null; next_attempt_at: string | null; candidate_label: string | null }[];
 }
 
 export const listCandidateCvs = (section: CandidateSection): Promise<CandidateCv[]> =>
@@ -75,6 +80,8 @@ export const listActiveCvBatches = (): Promise<CvBatch[]> => apiFetch("/candidat
 export const getCvBatch = (batchId: string): Promise<CvBatch> => apiFetch(`/candidates/batches/${batchId}`);
 export const retryCvBatchItem = (itemId: string): Promise<{ id: string; batch_id: string; status: string }> =>
   apiFetch(`/candidates/batch-items/${itemId}/retry`, { method: "POST" });
+export const cancelCvBatchItem = (itemId: string): Promise<{ id: string; batch_id: string; status: string }> =>
+  apiFetch(`/candidates/batch-items/${itemId}/cancel`, { method: "POST" });
 export const decideCandidateReview = (applicationId: string, decision: "approve" | "reject", reason: string): Promise<{ application_id: string; stage: string; decision: string }> =>
   apiFetch(`/candidates/${applicationId}/review`, { method: "POST", body: JSON.stringify({ decision, reason }) });
 
