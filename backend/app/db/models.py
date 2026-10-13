@@ -197,9 +197,15 @@ class InterviewSession(Base, IdMixin, TimestampMixin):
     candidate_email: Mapped[str] = mapped_column(String(255))
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     timezone_name: Mapped[str] = mapped_column(String(80))
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=30, server_default="30")
+    calendar_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    calendar_sync_status: Mapped[str] = mapped_column(String(30), default="not_connected", server_default="not_connected")
+    calendar_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invitation_delivery: Mapped[str | None] = mapped_column(String(30), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", server_default="scheduled")
     invitation_hash: Mapped[str] = mapped_column(String(64), unique=True)
     invitation_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invitation_base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     invitation_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     candidate_waiting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     candidate_consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -210,6 +216,18 @@ class InterviewSession(Base, IdMixin, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     questions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+
+
+# One interviewer's encrypted OAuth authorization for the Google Calendar MCP server.
+class GoogleCalendarConnection(Base, IdMixin, TimestampMixin):
+    __tablename__ = "google_calendar_connections"
+    __table_args__ = (UniqueConstraint("owner_id", name="uq_google_calendar_connections_owner"),)
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    encrypted_token: Mapped[str] = mapped_column(Text)
+    account_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scopes: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class InterviewTurn(Base, IdMixin, TimestampMixin):

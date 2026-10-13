@@ -2,14 +2,16 @@ import { apiFetch, tokenStore } from "./client";
 
 export interface Interview {
   id: string; application_id: string; job_id: string; job_code: string; job_title: string;
-  candidate_name: string; candidate_email: string; scheduled_at: string; timezone_name: string;
+  candidate_name: string; candidate_number: number; candidate_email: string; scheduled_at: string; timezone_name: string;
+  duration_minutes: number; calendar_sync_status: string; calendar_sync_error: string | null;
+  invitation_delivery: string | null;
   status: string; invitation_sent_at: string | null; candidate_waiting_at: string | null;
   candidate_admitted_at: string | null; candidate_joined_at: string | null;
   interviewer_joined_at: string | null; started_at: string | null; ended_at: string | null;
   questions: { text: string; source: string }[];
   candidate_profile: Record<string, unknown> | null;
   f1: { score: number; requirements: unknown[] } | null;
-  f2: { score: number; dimensions: unknown[] } | null;
+  f2: { score: number; dimensions: { key: string; score: number; justification: string; missing?: boolean }[] } | null;
 }
 
 export interface GuestStatus {
@@ -18,8 +20,14 @@ export interface GuestStatus {
 }
 export interface JoinCredentials { url: string; token: string; room: string; role: string }
 export interface TranscriptTurn { id: string; role: string; started_at: string; ended_at: string; text: string }
+export interface CalendarConnection { connected: boolean; account_email: string | null; authorization_url?: string | null }
 
 export const listInterviews = (): Promise<Interview[]> => apiFetch("/interviews");
+export const googleCalendarStatus = (): Promise<CalendarConnection> => apiFetch("/interviews/google-calendar/status");
+export const connectGoogleCalendar = (): Promise<CalendarConnection> =>
+  apiFetch("/interviews/google-calendar/connect", { method: "POST" });
+export const disconnectGoogleCalendar = (): Promise<{ disconnected: boolean }> =>
+  apiFetch("/interviews/google-calendar/connect", { method: "DELETE" });
 export const getInterview = (id: string): Promise<Interview> => apiFetch(`/interviews/${id}`);
 export const scheduleInterview = (applicationId: string, candidateEmail: string, scheduledAt: string, timezoneName: string): Promise<Interview> =>
   apiFetch("/interviews", { method: "POST", body: JSON.stringify({ application_id: applicationId, candidate_email: candidateEmail, scheduled_at: scheduledAt, timezone_name: timezoneName }) });
