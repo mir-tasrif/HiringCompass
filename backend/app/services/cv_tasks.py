@@ -79,7 +79,7 @@ async def refresh_batch_status(session: AsyncSession, batch_id: uuid.UUID) -> No
         batch.status = "processing" if "processing" in statuses else "queued"
     elif "waiting_review" in statuses:
         batch.status = "waiting_review"
-    elif "failed" in statuses:
+    elif "failed" in statuses or "cancelled" in statuses:
         batch.status = "completed_with_errors"
     else:
         batch.status = "completed"
@@ -574,7 +574,7 @@ async def cv_worker_once(session_factory: async_sessionmaker[AsyncSession], sett
                 else:
                     item.error = str(exc)[:2000]
                     batch = await session.get(CvBatch, item.batch_id)
-                    max_attempts = max(settings.worker_max_attempts, 6) if batch and batch.kind == "scoring" and isinstance(exc, TransientError) else settings.worker_max_attempts
+                    max_attempts = settings.worker_max_attempts
                     if item.attempts < max_attempts:
                         delay = _retry_delay_seconds(settings, item.attempts, exc)
                         item.status = "queued"
@@ -601,7 +601,10 @@ async def run_cv_worker(session_factory: async_sessionmaker[AsyncSession], setti
             if not worked:
                 await asyncio.sleep(settings.worker_poll_seconds)
 
-    if scoring_graph is not None and settings.worker_max_concurrency > 1:
+    if settings.llm_profile == "remote":
+        # One remote AI task at a time prevents a CV batch from bursting into provider limits.
+        await consume()
+    elif scoring_graph is not None and settings.worker_max_concurrency > 1:
         await asyncio.gather(consume({"scoring"}),
             *(consume({"integrity_parse", "ranking"}) for _ in range(settings.worker_max_concurrency - 1)))
     else:

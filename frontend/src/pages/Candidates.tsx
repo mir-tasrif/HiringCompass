@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
-import { actOnCandidateCvs, CandidateAction, CandidateCv, CandidateSection, CvBatch,
+import { actOnCandidateCvs, cancelCvBatchItem, CandidateAction, CandidateCv, CandidateSection, CvBatch,
   decideCandidateReview, getCvBatch, getF2Weights, listActiveCvBatches, listCandidateCvs, retryCvBatchItem, startCvBatch, startF2Batch } from "../api/candidates";
 import { loadCvPreview } from "../api/jobs";
 
@@ -83,10 +83,21 @@ export default function Candidates() {
         setBatches((current) => ({ ...current, ...Object.fromEntries(valid.map((batch) => [batch.id, batch])) }));
         const scoringTasks = new Map(valid.filter((batch) => batch.kind === "scoring")
           .flatMap((batch) => batch.items.map((item) => [item.application_id, item] as const)));
-        if (scoringTasks.size) setItems((current) => {
+        const rankingTasks = new Map(valid.filter((batch) => batch.kind === "ranking")
+          .flatMap((batch) => batch.items.map((item) => [item.application_id, item] as const)));
+        if (scoringTasks.size || rankingTasks.size) setItems((current) => {
           let changed = false;
           const next = current.map((candidate) => {
           const task = scoringTasks.get(candidate.id);
+          if (candidate.stage === "ranking") {
+            const rankingTask = rankingTasks.get(candidate.id);
+            if (!rankingTask || candidate.ranking_task_status === rankingTask.status &&
+                candidate.ranking_task_error === rankingTask.error &&
+                candidate.ranking_task_next_attempt_at === rankingTask.next_attempt_at) return candidate;
+            changed = true;
+            return { ...candidate, ranking_task_status: rankingTask.status, ranking_task_error: rankingTask.error,
+              ranking_task_next_attempt_at: rankingTask.next_attempt_at };
+          }
           if (!task || candidate.stage !== "scoring_processing" ||
               candidate.scoring_task_status === task.status && candidate.scoring_task_error === task.error &&
               candidate.scoring_task_next_attempt_at === task.next_attempt_at) return candidate;
@@ -226,12 +237,43 @@ export default function Candidates() {
     finally { setSaving(false); }
   };
 
+  const cancelQueued = async (itemId: string) => {
+    if (!window.confirm("Cancel this queued CV task and return the CV to its previous section?")) return;
+    setSaving(true); setError(null);
+    try {
+      const cancelled = await cancelCvBatchItem(itemId);
+      const updated = await getCvBatch(cancelled.batch_id);
+      setBatches((current) => ({ ...current, [updated.id]: updated }));
+      setNotice("Queued processing cancelled. The CV is back in its previous section.");
+      await refresh();
+    } catch (err) { setError(err instanceof ApiError ? err.message : "Could not cancel queued processing."); }
+    finally { setSaving(false); }
+  };
+
+  const deleteQueued = async (applicationId: string) => {
+    setSelected(new Set([applicationId]));
+    setReason("Recruiter deleted a CV while its processing was queued.");
+    setAction("delete");
+  };
+
   const activePreview = items.find((item) => item.id === previewId);
   const allSelected = selectableItems.length > 0 && selectableItems.slice(0, selectionLimit).every((item) => selected.has(item.id));
   const title = sections.find((item) => item.id === section)?.label ?? "Candidates";
   const recentBatches = Object.values(batches).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const displayedBatch = recentBatches.find((batch) => ["queued", "processing"].includes(batch.status))
     ?? recentBatches.find((batch) => batch.status === "waiting_review") ?? recentBatches[0];
+  const otherActiveBatches = recentBatches.filter((batch) => batch.id !== displayedBatch?.id &&
+    ["queued", "processing", "waiting_review"].includes(batch.status));
+  const renderBatch = (batch: CvBatch) => <article className="cv-batch" key={batch.id}>
+    <div className="cv-batch-title"><strong>{batchLabel(batch.kind)}</strong><span>{stageLabel(batch.status)} · {batch.completed}/{batch.total} complete · {batch.waiting_review} awaiting review · {batch.rejected} rejected · {batch.failed} failed · {batch.cancelled} cancelled</span></div>
+    <progress max={batch.total || 1} value={batch.completed + batch.waiting_review + batch.rejected + batch.failed + batch.cancelled} aria-label={`${batchLabel(batch.kind)} progress`} />
+    {batch.items.map((item) => <div className={item.status === "failed" ? "cv-batch-failure" : "cv-batch-item"} key={item.id}>
+      <span>{item.candidate_label ?? items.find((candidate) => candidate.id === item.application_id)?.candidate_name ?? item.application_id.slice(0, 8)} · {stageLabel(item.status)}{item.next_attempt_at ? ` · retry after ${new Date(item.next_attempt_at).toLocaleTimeString()}` : ""}{item.error ? ` · ${item.error}` : ""}</span>
+      {(item.status === "failed" || item.status === "queued" && item.next_attempt_at) && <button type="button" className="secondary" onClick={() => void retry(item.id)} disabled={saving}>Retry now</button>}
+      {item.status === "queued" && <button type="button" className="secondary" onClick={() => void cancelQueued(item.id)} disabled={saving}>Cancel task</button>}
+      {item.status === "queued" && <button type="button" className="danger-button" onClick={() => void deleteQueued(item.application_id)} disabled={saving}>Delete CV</button>}
+    </div>)}
+  </article>;
 
   return <div className="candidates-page">
     <header className="page-heading"><div><p className="eyebrow">TALENT PIPELINE</p><h1>Candidates</h1><p className="muted">Review CV evidence and move candidates through the hiring stages.</p></div></header>
@@ -249,14 +291,8 @@ export default function Candidates() {
 
     {displayedBatch && <section className="cv-batch-panel card" aria-label="Background CV processing">
       <div className="cv-batch-heading"><div><p className="eyebrow">BACKGROUND PROCESSING</p><h3>Recent CV batches</h3></div><span className="muted">Progress is saved if you leave this page.</span></div>
-      {[displayedBatch].map((batch) => <article className="cv-batch" key={batch.id}>
-        <div className="cv-batch-title"><strong>{batchLabel(batch.kind)}</strong><span>{stageLabel(batch.status)} · {batch.completed}/{batch.total} complete · {batch.waiting_review} awaiting review · {batch.rejected} rejected · {batch.failed} failed</span></div>
-        <progress max={batch.total || 1} value={batch.completed + batch.waiting_review + batch.rejected + batch.failed} aria-label={`${batchLabel(batch.kind)} progress`} />
-        {batch.items.map((item) => <div className={item.status === "failed" ? "cv-batch-failure" : "cv-batch-item"} key={item.id}>
-          <span>{items.find((candidate) => candidate.id === item.application_id)?.candidate_name ?? item.application_id.slice(0, 8)} · {stageLabel(item.status)}{item.next_attempt_at ? ` · scheduled after ${new Date(item.next_attempt_at).toLocaleTimeString()}` : ""}{item.error ? ` · ${item.error}` : ""}</span>
-          {item.status === "failed" && <button type="button" className="secondary" onClick={() => void retry(item.id)} disabled={saving}>Retry this CV</button>}
-        </div>)}
-      </article>)}
+      {renderBatch(displayedBatch)}
+      {otherActiveBatches.length > 0 && <details><summary>{otherActiveBatches.length} other active CV batch{otherActiveBatches.length === 1 ? "" : "es"}</summary>{otherActiveBatches.map(renderBatch)}</details>}
     </section>}
 
     {loading ? <section className="card empty-state">Loading candidates…</section> : <div className="submissions-layout candidates-layout">
@@ -286,11 +322,15 @@ export default function Candidates() {
               {section === "review" && <span className={item.stage === "f2_review" || item.stage === "f1_review" && item.screening?.mandatory_pass ? "review-summary-pass" : "review-summary-fail"}>{item.stage === "integrity_review" ? `F11 review required · ${item.integrity_signals.length} signal(s)` : item.stage === "f2_review" ? `F2 Scoring Review · ${item.scoring?.aggregate_score ?? "—"}/100 · recruiter decision needed` : item.screening?.mandatory_pass ? `F1 review · Mandatory requirements met · Rank #${item.screening.rank ?? "pending"} · ${item.screening.suitability_score}% match` : `F1 review · Screened out by mandatory gate · No rank · ${item.screening?.suitability_score ?? 0}% match`}</span>}
               {section === "scoring" && <span className={item.scoring_task_status === "failed" && item.stage === "scoring_processing" ? "rejection-summary" : "candidate-score"}>{item.stage === "scoring" ? "Ready for F2 scoring" : item.stage === "scoring_processing" && item.scoring_task_status === "failed" ? `F2 scoring failed · ${item.scoring_task_error ?? "Retry this CV"}` : item.stage === "scoring_processing" ? item.scoring_task_status === "queued" ? `F2 scoring queued${item.scoring_task_next_attempt_at ? ` · retry after ${new Date(item.scoring_task_next_attempt_at).toLocaleTimeString()}` : " · waiting for worker"}` : "F2 scoring in progress" : `F2 score ${item.scoring?.aggregate_score ?? "—"}/100 · ${item.stage === "interview_selection" ? "selected for interview" : "awaiting review"}`}</span>}
               {section === "interview" && <span className="candidate-score">Selected for interview · F2 score {item.scoring?.aggregate_score ?? "—"}/100</span>}
-              {section === "ranking" && item.screening && <span className="candidate-score">Rank #{item.screening.rank ?? "—"} · {item.screening.suitability_score}% · {item.screening.mandatory_pass ? "Mandatory gate passed" : "Screened out"}</span>}
+              {section === "ranking" && (item.stage === "ranking" ? <span className={item.ranking_task_status === "failed" ? "rejection-summary" : "candidate-score"}>
+                {item.ranking_task_status === "failed" ? `F1 ranking failed · ${item.ranking_task_error ?? "Retry this CV"}` : item.ranking_task_status === "queued" ? `F1 ranking queued${item.ranking_task_next_attempt_at ? ` · retry after ${new Date(item.ranking_task_next_attempt_at).toLocaleTimeString()}` : " · waiting for worker"}` : "F1 ranking in progress"}
+              </span> : item.screening && <span className="candidate-score">Rank #{item.screening.rank ?? "—"} · {item.screening.suitability_score}% · {item.screening.mandatory_pass ? "Mandatory gate passed" : "Screened out"}</span>)}
               {section === "rejected" && <span className="rejection-summary">{item.rejection_action === "deleted" ? "Deleted" : "Rejected"} from {stageLabel(item.rejected_from_stage || "uploaded")}: {item.rejection_reason}</span>}
             </button>
             {section === "scoring" && item.stage === "scoring_processing" && item.scoring_task_status === "failed" && item.scoring_task_id &&
               <button type="button" className="secondary cv-item-retry" onClick={() => void retry(item.scoring_task_id!)} disabled={saving}>Retry F2 scoring</button>}
+            {section === "ranking" && item.stage === "ranking" && item.ranking_task_status === "failed" && item.ranking_task_id &&
+              <button type="button" className="secondary cv-item-retry" onClick={() => void retry(item.ranking_task_id!)} disabled={saving}>Retry F1 ranking</button>}
           </li>)}
         </ul>}
       </section>

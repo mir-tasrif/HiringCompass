@@ -62,6 +62,10 @@ class CandidateCvOut(BaseModel):
     integrity_task_id: uuid.UUID | None = None
     integrity_task_status: str | None = None
     integrity_task_error: str | None = None
+    ranking_task_id: uuid.UUID | None = None
+    ranking_task_status: str | None = None
+    ranking_task_error: str | None = None
+    ranking_task_next_attempt_at: datetime | None = None
     scoring_task_id: uuid.UUID | None = None
     scoring_task_status: str | None = None
     scoring_task_error: str | None = None
@@ -101,6 +105,7 @@ class BatchItemOut(BaseModel):
     attempts: int
     error: str | None
     next_attempt_at: datetime | None
+    candidate_label: str | None = None
 
 
 class BatchOut(BaseModel):
@@ -113,6 +118,7 @@ class BatchOut(BaseModel):
     failed: int
     waiting_review: int
     rejected: int
+    cancelled: int
     items: list[BatchItemOut]
 
 
@@ -137,14 +143,25 @@ class ReviewDecisionOut(BaseModel):
     decision: str
 
 
-def _batch_out(batch: CvBatch, items: list[CvBatchItem]) -> BatchOut:
+def _batch_out(batch: CvBatch, items: list[CvBatchItem], labels: dict[uuid.UUID, str] | None = None) -> BatchOut:
     return BatchOut(id=batch.id, created_at=batch.created_at, kind=batch.kind, status=batch.status, total=len(items),
         completed=sum(item.status == "completed" for item in items),
         failed=sum(item.status == "failed" for item in items),
         waiting_review=sum(item.status == "waiting_review" for item in items),
         rejected=sum(item.status == "rejected" for item in items),
+        cancelled=sum(item.status == "cancelled" for item in items),
         items=[BatchItemOut(id=item.id, application_id=item.application_id, status=item.status,
-                            attempts=item.attempts, error=item.error, next_attempt_at=item.next_attempt_at) for item in items])
+                            attempts=item.attempts, error=item.error, next_attempt_at=item.next_attempt_at,
+                            candidate_label=(labels or {}).get(item.application_id)) for item in items])
+
+
+async def _batch_labels(session: AsyncSession, items: list[CvBatchItem]) -> dict[uuid.UUID, str]:
+    if not items:
+        return {}
+    rows = (await session.execute(select(Application.id, Application.candidate_number, Job.public_code)
+        .join(Job, Job.id == Application.job_id)
+        .where(Application.id.in_([item.application_id for item in items])))).all()
+    return {application_id: f"{job_code} · candidate{number:03d}" for application_id, number, job_code in rows}
 
 
 @router.get("", response_model=list[CandidateCvOut])
@@ -173,7 +190,8 @@ async def list_candidate_cvs(
     elif section == "parsed":
         statement = statement.where(Application.stage == "parsed")
     elif section == "ranking":
-        statement = statement.where(CandidateScreening.id.is_not(None), CandidateScreening.mandatory_pass.is_(True))
+        statement = statement.where(or_(Application.stage == "ranking",
+            and_(CandidateScreening.id.is_not(None), CandidateScreening.mandatory_pass.is_(True))))
     elif section == "scoring":
         statement = statement.where(Application.stage.in_(["scoring", "scoring_processing", "f2_review", "interview_selection"]))
     elif section == "review":
@@ -206,6 +224,12 @@ async def list_candidate_cvs(
     scoring_tasks: dict[uuid.UUID, CvBatchItem] = {}
     for task in scoring_rows:
         scoring_tasks.setdefault(task.application_id, task)
+    ranking_rows = (await session.execute(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
+                    .where(CvBatchItem.application_id.in_(ids), CvBatch.kind == "ranking")
+                    .order_by(CvBatchItem.created_at.desc(), CvBatchItem.id.desc()))).scalars().all()
+    ranking_tasks: dict[uuid.UUID, CvBatchItem] = {}
+    for task in ranking_rows:
+        ranking_tasks.setdefault(task.application_id, task)
     score_rows = list(await session.scalars(select(CandidateScore).where(CandidateScore.application_id.in_(ids))
         .order_by(CandidateScore.created_at.desc(), CandidateScore.id.desc())))
     current_scores: dict[uuid.UUID, CandidateScore] = {}
@@ -243,6 +267,10 @@ async def list_candidate_cvs(
             integrity_task_id=integrity_tasks[application.id].id if application.id in integrity_tasks else None,
             integrity_task_status=integrity_tasks[application.id].status if application.id in integrity_tasks else None,
             integrity_task_error=integrity_tasks[application.id].error if application.id in integrity_tasks else None,
+            ranking_task_id=ranking_tasks[application.id].id if application.id in ranking_tasks else None,
+            ranking_task_status=ranking_tasks[application.id].status if application.id in ranking_tasks else None,
+            ranking_task_error=ranking_tasks[application.id].error if application.id in ranking_tasks else None,
+            ranking_task_next_attempt_at=ranking_tasks[application.id].next_attempt_at if application.id in ranking_tasks else None,
             scoring_task_id=scoring_tasks[application.id].id if application.id in scoring_tasks else None,
             scoring_task_status=scoring_tasks[application.id].status if application.id in scoring_tasks else None,
             scoring_task_error=scoring_tasks[application.id].error if application.id in scoring_tasks else None,
@@ -275,7 +303,7 @@ async def _start_batches(session: AsyncSession, user: User, body: StartBatchBody
             await _event(session, application, user.id, "batch_started", "integrity_check" if kind == "integrity_parse" else "ranking",
                          "Recruiter started CV integrity and parsing." if kind == "integrity_parse" else "Recruiter started F1 requirement-based ranking.")
         await session.flush()
-        batches.append(_batch_out(batch, items))
+        batches.append(_batch_out(batch, items, await _batch_labels(session, items)))
     await session.commit()
     return StartBatchesOut(batches=batches)
 
@@ -309,7 +337,7 @@ async def start_scoring_batch(body: StartScoringBody, user: User = Depends(get_c
     batch = await start_f2_batch(session, owner_id=user.id, application_ids=body.application_ids,
                                  weights=body.weights, rescore=body.rescore)
     items = list(await session.scalars(select(CvBatchItem).where(CvBatchItem.batch_id == batch.id)))
-    return StartBatchesOut(batches=[_batch_out(batch, items)])
+    return StartBatchesOut(batches=[_batch_out(batch, items, await _batch_labels(session, items))])
 
 
 @router.get("/batches", response_model=list[BatchOut])
@@ -325,7 +353,7 @@ async def list_active_batches(user: User = Depends(get_current_interviewer),
     for batch in batches:
         items = list(await session.scalars(select(CvBatchItem).where(CvBatchItem.batch_id == batch.id)
                                            .order_by(CvBatchItem.created_at)))
-        output.append(_batch_out(batch, items))
+        output.append(_batch_out(batch, items, await _batch_labels(session, items)))
     return output
 
 
@@ -336,7 +364,7 @@ async def get_batch(batch_id: uuid.UUID, user: User = Depends(get_current_interv
     if batch is None:
         raise NotFoundError("CV batch not found.")
     items = list(await session.scalars(select(CvBatchItem).where(CvBatchItem.batch_id == batch.id).order_by(CvBatchItem.created_at)))
-    return _batch_out(batch, items)
+    return _batch_out(batch, items, await _batch_labels(session, items))
 
 
 @router.post("/batch-items/{item_id}/retry", response_model=RetryOut, status_code=202)
@@ -346,8 +374,8 @@ async def retry_batch_item(item_id: uuid.UUID, user: User = Depends(get_current_
         .where(CvBatchItem.id == item_id, CvBatch.owner_id == user.id).with_for_update())
     if item is None:
         raise NotFoundError("CV processing task not found.")
-    if item.status != "failed":
-        raise HTTPException(status_code=409, detail="Only failed CV tasks can be retried.")
+    if item.status not in {"failed", "queued"} or item.status == "queued" and item.next_attempt_at is None:
+        raise HTTPException(status_code=409, detail="Only failed or delayed CV tasks can be retried now.")
     application = await session.get(Application, item.application_id)
     if application is None or application.stage == "rejected":
         raise HTTPException(status_code=409, detail="Rejected CVs must be uploaded again to retry.")
@@ -357,6 +385,36 @@ async def retry_batch_item(item_id: uuid.UUID, user: User = Depends(get_current_
         batch.status, batch.completion_notified = "queued", False
     await session.commit()
     return RetryOut(id=item.id, batch_id=item.batch_id, status=item.status)
+
+
+@router.post("/batch-items/{item_id}/cancel", response_model=RetryOut)
+async def cancel_batch_item(item_id: uuid.UUID, user: User = Depends(get_current_interviewer),
+                            session: AsyncSession = Depends(get_session)) -> RetryOut:
+    item = await session.scalar(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
+        .where(CvBatchItem.id == item_id, CvBatch.owner_id == user.id).with_for_update(of=CvBatchItem))
+    if item is None:
+        raise NotFoundError("CV processing task not found.")
+    if item.status != "queued":
+        raise HTTPException(status_code=409, detail="Only queued CV tasks can be cancelled.")
+    batch = await session.get(CvBatch, item.batch_id)
+    application = await session.scalar(select(Application).where(Application.id == item.application_id).with_for_update())
+    if batch is None or application is None:
+        raise NotFoundError("CV processing record not found.")
+    expected, restored = {"integrity_parse": ("integrity_check", "uploaded"),
+                          "ranking": ("ranking", "parsed"),
+                          "scoring": ("scoring_processing", "scoring")}[batch.kind]
+    if application.stage != expected:
+        raise HTTPException(status_code=409, detail="This CV has already advanced; refresh the page.")
+    if batch.kind == "scoring" and await session.scalar(select(CandidateScore.id)
+            .where(CandidateScore.application_id == application.id).limit(1)):
+        restored = "f2_review"
+    await _event(session, application, user.id, "batch_cancelled", restored,
+                 "Recruiter cancelled queued CV processing.")
+    item.status, item.error, item.next_attempt_at, item.lease_expires_at = "cancelled", None, None, None
+    await refresh_batch_status(session, batch.id)
+    await session.commit()
+    await _finalize_batch(SessionLocal, batch.id)
+    return RetryOut(id=item.id, batch_id=batch.id, status=item.status)
 
 
 @router.post("/{application_id}/review", response_model=ReviewDecisionOut)
