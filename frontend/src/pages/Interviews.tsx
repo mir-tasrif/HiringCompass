@@ -2,11 +2,18 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { CandidateCv, listCandidateCvs } from "../api/candidates";
 import { CalendarConnection, Interview, connectGoogleCalendar, disconnectGoogleCalendar,
-  googleCalendarStatus, listInterviews, resendInvitation, rescheduleInterview, scheduleInterview } from "../api/interviews";
+  googleCalendarStatus, listInterviews, resendInvitation, rescheduleInterview, scheduleInterview, sendInterviewToF5 } from "../api/interviews";
 
 function localInput(iso: string) {
   const date = new Date(iso);
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
+function candidateDisplayName(session: Interview) {
+  const parsed = session.candidate_profile?.candidate_name;
+  if (session.candidate_name && !/^candidate\d+$/i.test(session.candidate_name.trim())) return session.candidate_name;
+  if (typeof parsed === "string" && parsed.trim()) return parsed.trim();
+  return session.candidate_name || `candidate${String(session.candidate_number).padStart(3, "0")}`;
 }
 
 export default function Interviews() {
@@ -20,9 +27,23 @@ export default function Interviews() {
   const [when, setWhen] = useState("");
   const [zone, setZone] = useState(Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Dhaka");
   const [busy, setBusy] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selected = useMemo(() => candidates.find((candidate) => candidate.id === applicationId), [candidates, applicationId]);
+  const interviewGroups = useMemo(() => {
+    const grouped = new Map<string, Interview[]>();
+    for (const item of sessions) grouped.set(item.application_id, [...(grouped.get(item.application_id) || []), item]);
+    return [...grouped.entries()].map(([id, records]) => {
+      const byRecent = (a: Interview, b: Interview) =>
+        new Date(b.ended_at || b.scheduled_at).getTime() - new Date(a.ended_at || a.scheduled_at).getTime();
+      const current = records.filter((item) => item.status !== "ended").sort(byRecent)[0]
+        || records.filter((item) => item.transcript_turn_count > 0).sort(byRecent)[0]
+        || [...records].sort(byRecent)[0];
+      return { id, current, history: records.filter((item) => item.id !== current.id).sort(byRecent) };
+    }).sort((a, b) => new Date(b.current.ended_at || b.current.scheduled_at).getTime()
+      - new Date(a.current.ended_at || a.current.scheduled_at).getTime());
+  }, [sessions]);
 
   const refresh = async () => {
     const [nextCandidates, nextSessions] = await Promise.all([listCandidateCvs("interview"), listInterviews()]);
@@ -48,6 +69,25 @@ export default function Interviews() {
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not resend the invitation."); }
     finally { setBusy(false); }
   };
+  const sendToF5 = async (session: Interview) => {
+    setBusy(true); setError(null); setNotice(null);
+    try {
+      await sendInterviewToF5(session.id);
+      setNotice("The CV and latest transcript are ready in Candidates → F5 QA Analysis.");
+      await refresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send the transcript to F5."); }
+    finally { setBusy(false); }
+  };
+  const reinterview = (session: Interview) => {
+    setEditing(null); setApplicationId(session.application_id); setEmail(session.candidate_email);
+    setWhen(""); setZone(session.timezone_name); setError(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const toggleHistory = (id: string) => setHistoryOpen((previous) => {
+    const next = new Set(previous);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const connectCalendar = async () => {
     setBusy(true); setError(null);
     try {
@@ -103,15 +143,23 @@ export default function Interviews() {
         </form>
       </section>
       <section className="interview-sessions"><h2>Scheduled and past interviews</h2>
-        {sessions.length === 0 && <div className="card empty-state">No interviews scheduled yet.</div>}
-        {sessions.map((session) => <article key={session.id} className="card interview-session-card">
+        {interviewGroups.length === 0 && <div className="card empty-state">No interviews scheduled yet.</div>}
+        {interviewGroups.map(({ id, current: session, history }) => <article key={id} className="card interview-session-card">
           <div><p className="eyebrow">{session.job_code} · {session.status.toUpperCase()}</p>
-            <h3>{session.candidate_name}</h3><p>{session.job_title}</p>
+            <h3>{candidateDisplayName(session)}</h3><p>{session.job_title}</p>
+            <p className="muted">{session.candidate_email} · F1 match: {session.f1?.score ?? "—"}% · F2 score: {session.f2?.score ?? "—"}/100</p>
             <p className="muted">{new Date(session.scheduled_at).toLocaleString(undefined, { timeZone: session.timezone_name })} · {session.timezone_name}</p>
             <p className="muted">Invitation: {session.invitation_sent_at ? (session.invitation_delivery === "google_calendar" ? "Google Calendar MCP invitation sent" : session.invitation_delivery === "google_calendar_api" ? "Google Calendar invitation sent" : "SMTP email sent") : "delivery failed"}
               {session.calendar_sync_status === "synced" && " · Calendar synced"}{session.calendar_sync_status === "failed" && " · Calendar sync failed; SMTP fallback used"}
-              {session.candidate_waiting_at && " · candidate waiting"}{session.candidate_admitted_at && " · admitted"}</p></div>
+              {session.candidate_waiting_at && " · candidate waiting"}{session.candidate_admitted_at && " · admitted"}</p>
+            {session.status === "ended" && <p className="muted">{session.transcript_turn_count ? `${session.transcript_turn_count} transcript turns` : "No transcript captured"}{session.f5_ready && " · Ready for F5"}</p>}
+            {history.length > 0 && <><button type="button" className="secondary" onClick={() => toggleHistory(id)}>{historyOpen.has(id) ? "Hide interview history" : `View interview history (${history.length})`}</button>
+              {historyOpen.has(id) && <ul className="interview-history">{history.map((past) => <li key={past.id}>
+                {new Date(past.ended_at || past.scheduled_at).toLocaleString()} · {past.status} · {past.transcript_turn_count} transcript turns · <Link to={`/interviews/${past.id}`}>View transcript</Link>
+              </li>)}</ul>}</>}</div>
           <div className="candidate-actions"><Link className="button" to={`/interviews/${session.id}`}>{session.status === "ended" ? "View transcript" : "Open interview"}</Link>
+            {session.status === "ended" && <><button type="button" disabled={busy || !session.transcript_turn_count} onClick={() => void sendToF5(session)}>{session.f5_ready ? "Ready for F5" : "Send to F5 QA Analysis"}</button>
+              <button type="button" className="secondary" onClick={() => reinterview(session)}>Reinterview</button></>}
             {session.status !== "live" && session.status !== "ended" && <><button type="button" className="secondary" onClick={() => edit(session)}>Reschedule</button>
               <button type="button" className="secondary" disabled={busy} onClick={() => void resend(session)}>Resend link</button></>}</div>
         </article>)}

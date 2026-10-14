@@ -199,7 +199,7 @@ export default function InterviewRoom() {
           <div className="interview-tabs"><button className={tab === "transcript" ? "active" : ""} onClick={() => setTab("transcript")}>Live transcript</button>
             <button className={tab === "assistant" ? "active" : ""} onClick={() => setTab("assistant")}>Recruiter assistant</button></div>
           {tab === "transcript" ? <div className="interview-turns">
-            {turns.length === 0 && <p className="muted">Transcript turns will appear as each short audio segment is processed.</p>}
+            {turns.length === 0 && <p className="muted">Transcript turns will appear as speech is processed.</p>}
             {turns.map((turn) => <article key={turn.id} className={`interview-turn ${turn.role}`}>
               <strong>{turn.role === "candidate" ? candidateName : "You"}</strong>
               <time>{new Date(turn.started_at).toLocaleTimeString()}</time><p>{turn.text}</p></article>)}
