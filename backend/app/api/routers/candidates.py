@@ -15,14 +15,15 @@ from app.api.deps import get_current_interviewer
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db.models import (Application, ApplicationEvent, AuditEvent, Candidate, CandidateProfile, CandidateScreening,
-                           CandidateScore, CvBatch, CvBatchItem, Document, Job, User)
+                           CandidateScore, CvBatch, CvBatchItem, Document, F5Handoff, Job, User)
 from app.db.session import SessionLocal, get_session
 from app.services.f2_batches import start_f2_batch
 from app.services.f2_policy import suggested_weights
 from app.services.cv_tasks import _event, _finalize_batch, _recompute_job_ranks, refresh_batch_status
+from app.services.f5_handoff import latest_transcript_session
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
-_SECTIONS = {"uploaded", "integrity", "parsed", "ranking", "scoring", "interview", "assessment", "final", "review", "rejected"}
+_SECTIONS = {"uploaded", "integrity", "parsed", "ranking", "scoring", "interview", "assessment", "f5", "review", "rejected"}
 
 
 class CandidateEventOut(BaseModel):
@@ -70,6 +71,8 @@ class CandidateCvOut(BaseModel):
     scoring_task_status: str | None = None
     scoring_task_error: str | None = None
     scoring_task_next_attempt_at: datetime | None = None
+    f5_interview_id: uuid.UUID | None = None
+    f5_interview_ended_at: datetime | None = None
 
 
 class CandidateActionBody(BaseModel):
@@ -198,8 +201,10 @@ async def list_candidate_cvs(
         statement = statement.where(Application.stage.in_(["integrity_review", "f1_review", "f2_review"]))
     elif section == "rejected":
         statement = statement.where(Application.stage == "rejected")
+    elif section == "f5":
+        statement = statement.join(F5Handoff, F5Handoff.application_id == Application.id)
     else:
-        target = {"interview": "interview_selection", "assessment": "assessed", "final": "final_selection"}[section]
+        target = {"interview": "interview_selection", "assessment": "assessed"}[section]
         statement = statement.where(Application.stage == target)
     if section == "ranking":
         statement = statement.order_by(Job.public_code.asc(), CandidateScreening.rank.asc().nulls_last(),
@@ -241,6 +246,9 @@ async def list_candidate_cvs(
             from_stage=event.from_stage, to_stage=event.to_stage, reason=event.reason, created_at=event.created_at))
     result = []
     for application, candidate, document, job, parsed, screening in rows:
+        f5_interview = await latest_transcript_session(session, application.id) if section == "f5" else None
+        if section == "f5" and f5_interview is None:
+            continue
         screening_data = None if screening is None else {
             "suitability_score": screening.suitability_score, "mandatory_pass": screening.mandatory_pass,
             "requirements": screening.requirements, "explanation": screening.explanation, "rank": screening.rank,
@@ -248,6 +256,8 @@ async def list_candidate_cvs(
         result.append(CandidateCvOut(id=application.id, job_id=job.id, job_code=job.public_code or "",
             job_title=job.title, job_version=application.job_version, candidate_number=application.candidate_number,
             candidate_name=candidate.full_name, candidate_email=candidate.email,
+            f5_interview_id=f5_interview.id if f5_interview else None,
+            f5_interview_ended_at=f5_interview.ended_at if f5_interview else None,
             source=application.source, original_filename=document.original_filename,
             converted_from_docx=document.status == "converted_from_docx", size_bytes=document.size_bytes,
             uploaded_at=document.created_at, stage=application.stage, rejection_action=application.rejection_action,
