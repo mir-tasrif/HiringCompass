@@ -45,10 +45,12 @@ export interface CandidateCv {
   scoring_task_status: string | null;
   scoring_task_error: string | null;
   scoring_task_next_attempt_at: string | null;
+  f5_interview_id: string | null;
+  f5_interview_ended_at: string | null;
 }
 
 export type CandidateAction = "delete" | "reject" | "permanent_delete";
-export type CandidateSection = "uploaded" | "integrity" | "parsed" | "ranking" | "scoring" | "interview" | "assessment" | "final" | "review" | "rejected";
+export type CandidateSection = "uploaded" | "integrity" | "parsed" | "ranking" | "scoring" | "interview" | "assessment" | "f5" | "review" | "rejected";
 
 export interface CvBatch {
   id: string;
