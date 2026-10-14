@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+/secrets/
 
 # Python
 __pycache__/
@@ -36,3 +37,4 @@ htmlcov/
 postgres_data/
 pgdata/
 hiringcompass-local-root.crt
+/secrets/

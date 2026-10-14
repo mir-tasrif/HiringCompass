@@ -51,6 +51,7 @@ services:
       - hc_errors:/app/errors
       - hc_files:/app/storage
       - ./backend/app/rag/corpora:/app/app/rag/corpora
+      - ./secrets:/run/secrets/google_calendar:ro
     ports:
       - "8000:8000"
 
@@ -58,6 +59,8 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker.cv_runner"]
+    healthcheck:
+      disable: true
     environment:
       LOG_DIR: /app/logs
       ERROR_DIR: /app/errors
@@ -91,9 +94,10 @@ services:
     entrypoint: ["/bin/sh", "-c", "if [ '${LLM_PROFILE:-local}' = 'local' ]; then ollama pull ${LLM_LOCAL_MODEL}; fi; ollama pull ${EMBEDDING_MODEL}"]
     restart: "no"
 
-  # Self-hosted LiveKit SFU for 1-on-1 interviews (separate per-participant tracks).
+  # Optional LAN-only LiveKit SFU. Hosted LiveKit is configured through LIVEKIT_URL.
   livekit:
     image: livekit/livekit-server:latest
+    profiles: ["local-livekit", "lan"]
     command: ["--dev", "--bind", "0.0.0.0"]
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
@@ -118,8 +122,6 @@ services:
     build: ./frontend
     ports:
       - "5173:80"
-    depends_on:
-      - api
     restart: unless-stopped
 
   # HTTPS on the host's LAN address is required for camera and microphone permissions.
@@ -141,7 +143,7 @@ services:
     restart: unless-stopped
 
   # Temporary publicly trusted HTTPS address for local interview demonstrations.
-  # LiveKit media still connects directly over the shared Wi-Fi network.
+  # The public web page runs here; hosted LiveKit carries media across networks.
   interview-tunnel:
     image: cloudflare/cloudflared:latest
     profiles: ["interview-tunnel"]
