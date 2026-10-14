@@ -244,6 +244,14 @@ class InterviewTurn(Base, IdMixin, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(40), default="groq_whisper")
 
 
+class F5Handoff(Base, IdMixin, TimestampMixin):
+    __tablename__ = "f5_handoffs"
+    __table_args__ = (UniqueConstraint("application_id", name="uq_f5_handoffs_application"),)
+
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+
+
 # Append-only stage and rejection history for each application.
 class ApplicationEvent(Base, IdMixin):
     __tablename__ = "application_events"

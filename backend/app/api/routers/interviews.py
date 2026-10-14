@@ -15,19 +15,20 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_interviewer
 from app.core.config import get_settings
-from app.db.models import (Application, Candidate, CandidateProfile, CandidateScore, CandidateScreening,
+from app.db.models import (Application, Candidate, CandidateProfile, CandidateScore, CandidateScreening, F5Handoff,
                            GoogleCalendarConnection, InterviewSession, InterviewTurn, Job, JobVersion, User)
 from app.db.session import get_session
 from app.llm.client import get_llm_client
 from app.services.cv_pipeline import extract_candidate_email
 from app.services.interviews import (close_room, deliver_calendar_invitation, invitation_hash,
-                                     new_invitation, rtc_token, send_invitation, transcribe_segment)
+                                     new_invitation, rtc_token, send_invitation, stt_token, transcribe_segment)
 from app.services import google_calendar_mcp
+from app.services.f5_handoff import latest_transcript_session
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 settings = get_settings()
@@ -76,6 +77,8 @@ class InterviewOut(BaseModel):
     candidate_profile: dict | None = None
     f1: dict | None = None
     f2: dict | None = None
+    transcript_turn_count: int = 0
+    f5_ready: bool = False
 
 
 class GuestOut(BaseModel):
@@ -94,6 +97,8 @@ class JoinOut(BaseModel):
     token: str
     room: str
     role: str
+    stt_provider: str = "groq"
+    stt_token: str | None = None
 
 
 class TurnOut(BaseModel):
@@ -170,9 +175,9 @@ async def google_calendar_callback(code: str | None = None, state: str | None = 
 
 def _validate_schedule(value: datetime, zone: str, email: str) -> tuple[datetime, str]:
     web_url = urlsplit(settings.web_base_url)
-    rtc_url = urlsplit(settings.livekit_public_url)
+    rtc_url = urlsplit(settings.livekit_client_url)
     if web_url.scheme != "https" or web_url.hostname in {"localhost", "127.0.0.1"} or rtc_url.scheme != "wss":
-        raise HTTPException(503, "Set WEB_BASE_URL to a trusted HTTPS address and LIVEKIT_PUBLIC_URL to its secure LiveKit signaling address before emailing candidates.")
+        raise HTTPException(503, "Set WEB_BASE_URL to a trusted HTTPS address and configure a secure LiveKit signaling URL before emailing candidates.")
     if value.tzinfo is None:
         raise HTTPException(422, "Choose a date and time with a timezone.")
     try:
@@ -214,6 +219,9 @@ async def _serialize(session: AsyncSession, record: InterviewSession) -> Intervi
     screening = await session.scalar(select(CandidateScreening).where(CandidateScreening.application_id == record.application_id))
     score = await session.scalar(select(CandidateScore).where(CandidateScore.application_id == record.application_id)
                                  .order_by(CandidateScore.created_at.desc()).limit(1))
+    turn_count = await session.scalar(select(func.count(InterviewTurn.id)).where(InterviewTurn.session_id == record.id)) or 0
+    handoff = await session.scalar(select(F5Handoff.id).where(F5Handoff.application_id == record.application_id))
+    latest = await latest_transcript_session(session, record.application_id) if handoff else None
     return InterviewOut(id=record.id, application_id=record.application_id, job_id=record.job_id,
         job_code=job.public_code or "", job_title=job.title, candidate_name=candidate.full_name,
         candidate_number=application.candidate_number,
@@ -228,7 +236,8 @@ async def _serialize(session: AsyncSession, record: InterviewSession) -> Intervi
         ended_at=record.ended_at, questions=record.questions or [],
         candidate_profile=profile.profile if profile else None,
         f1={"score": screening.suitability_score, "requirements": screening.requirements} if screening else None,
-        f2={"score": score.aggregate_score, "dimensions": score.dimensions} if score else None)
+        f2={"score": score.aggregate_score, "dimensions": score.dimensions} if score else None,
+        transcript_turn_count=turn_count, f5_ready=bool(latest and latest.id == record.id))
 
 
 async def _questions(session: AsyncSession, application: Application,
@@ -286,6 +295,20 @@ async def list_interviews(user: User = Depends(get_current_interviewer),
     records = list(await session.scalars(select(InterviewSession).where(InterviewSession.owner_id == user.id)
                                         .order_by(InterviewSession.scheduled_at.desc())))
     return [await _serialize(session, record) for record in records]
+
+
+@router.post("/{session_id}/send-to-f5", response_model=InterviewOut)
+async def send_to_f5(session_id: uuid.UUID, user: User = Depends(get_current_interviewer),
+                     session: AsyncSession = Depends(get_session)) -> InterviewOut:
+    record = await _owned(session, session_id, user)
+    latest = await latest_transcript_session(session, record.application_id)
+    if latest is None or latest.id != record.id:
+        raise HTTPException(409, "Only the latest completed interview with a transcript can be sent to F5.")
+    existing = await session.scalar(select(F5Handoff).where(F5Handoff.application_id == record.application_id))
+    if existing is None:
+        session.add(F5Handoff(application_id=record.application_id, requested_by=user.id))
+        await session.commit()
+    return await _serialize(session, record)
 
 
 @router.post("", response_model=InterviewOut, status_code=201)
@@ -442,8 +465,9 @@ async def interviewer_join(session_id: uuid.UUID, body: ConsentBody,
         raise HTTPException(409, "Start the interview and accept the transcription notice first.")
     record.interviewer_joined_at = datetime.now(timezone.utc)
     await session.commit()
-    return JoinOut(url=settings.livekit_public_url, token=rtc_token(settings, str(record.id), "interviewer", user.email),
-                   room=f"interview-{record.id}", role="interviewer")
+    return JoinOut(url=settings.livekit_client_url, token=rtc_token(settings, str(record.id), "interviewer", user.email),
+                   room=f"interview-{record.id}", role="interviewer", stt_provider=settings.stt_provider,
+                   stt_token=stt_token(settings, str(record.id), "interviewer") if settings.stt_provider == "assemblyai" else None)
 
 
 @router.get("/guest/status", response_model=GuestOut)
@@ -483,8 +507,9 @@ async def guest_join(body: ConsentBody, x_interview_token: str | None = Header(d
     candidate = await session.get(Candidate, (await session.get(Application, record.application_id)).candidate_id)
     record.candidate_joined_at = datetime.now(timezone.utc)
     await session.commit()
-    return JoinOut(url=settings.livekit_public_url, token=rtc_token(settings, str(record.id), "candidate", candidate.full_name),
-                   room=f"interview-{record.id}", role="candidate")
+    return JoinOut(url=settings.livekit_client_url, token=rtc_token(settings, str(record.id), "candidate", candidate.full_name),
+                   room=f"interview-{record.id}", role="candidate", stt_provider=settings.stt_provider,
+                   stt_token=stt_token(settings, str(record.id), "candidate") if settings.stt_provider == "assemblyai" else None)
 
 
 @router.get("/{session_id}", response_model=InterviewOut)

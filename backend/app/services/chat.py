@@ -23,6 +23,8 @@ from app.services.f2_policy import suggested_weights, validate_weights
 from app.core.errors import AppError, ApprovalError, ConflictError, NotFoundError
 from app.core.logging import get_logger, log_exception
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
+from app.graphs.lg2_job_intelligence.drafts import JobEditPlan
+from app.graphs.lg2_job_intelligence import prompts as job_prompts
 from app.graphs.lg2_job_intelligence.posting import build_posting_text
 from app.graphs.orchestrator import resume_graph, run_graph, run_status, run_values
 from app.schemas.contracts import ApprovalGate, WorkKind
@@ -31,6 +33,7 @@ from app.services import approvals, jobs
 from app.services.postings import post_to_discord
 from app.services import google_calendar_mcp
 from app.services.interviews import deliver_calendar_invitation, new_invitation
+from app.services.interview_chat import handle_interview_chat, parse_interview_time, roster_reply, selected_roster
 
 
 logger = get_logger("services.chat")
@@ -74,7 +77,7 @@ def _explicit_job_request(message: str) -> bool:
 def _is_job_status_question(message: str) -> bool:
     text = message.strip().lower().replace("’", "'")
     return bool(re.search(
-        r"\b(?:what(?:'s| is)\s+(?:the\s+)?(?:updates?|status|progress)|"
+        r"\b(?:what(?:'s| is)\s+(?:the\s+)?(?:updates?|status|progress|next|now)|what\s+now|whats\s+now|"
         r"(?:give|show|tell)\s+me\s+(?:the\s+)?(?:job\s+)?(?:updates?|status)|"
         r"how many\s+(?:cvs|resumes|applications)|"
         r"(?:statuses|status|updates?|progress)\s+(?:of|for)\s+(?:the\s+)?jobs?)\b",
@@ -213,6 +216,12 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
     messages = await list_messages(session, thread.id)
     last_user = next(m for m in reversed(messages) if m.role == "user")
     simple = last_user.content.strip().lower().rstrip(".!?")
+    previous_assistant = messages[-2] if len(messages) > 1 and messages[-2].role == "assistant" else None
+    pending_edit_question = (previous_assistant is not None and
+                             (previous_assistant.payload or {}).get("field") == "job_edit_requirement_details")
+    if thread.state == "awaiting_decision" and pending_edit_question:
+        original = (previous_assistant.payload or {}).get("original_request", "")
+        return await _decide(session, runtime, thread, "edit", f"{original}\nRecruiter clarification: {last_user.content}")
     if simple in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "thanks", "thank you"}:
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
@@ -226,6 +235,25 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
         return await _job_update(session, runtime, thread)
+    previous_payload = (previous_assistant.payload or {}) if previous_assistant else {}
+    batch_action = await handle_interview_chat(session, runtime.deps.settings, thread.owner_id,
+                                               thread.job_id, last_user.content, previous_payload)
+    if batch_action is not None:
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return batch_action
+    if re.search(r"\b(?:already|have)\b.*\b(?:reviewed|selected)\b.*\binterview\b", last_user.content, re.I):
+        job = await session.scalar(select(Job).where(Job.id == thread.job_id, Job.owner_id == thread.owner_id)) if thread.job_id else None
+        if job and job.active_version is not None:
+            roster = await selected_roster(session, thread.owner_id, job.id)
+            reply, payload = roster_reply(job, roster)
+            return "I checked the saved candidate stages for this job. " + reply, payload
+    if re.search(r"\bmove\b.*\binterview\s+selection\b", last_user.content, re.I):
+        job = await session.scalar(select(Job).where(Job.id == thread.job_id, Job.owner_id == thread.owner_id)) if thread.job_id else None
+        if job and job.active_version is not None:
+            roster = await selected_roster(session, thread.owner_id, job.id)
+            reply, payload = roster_reply(job, roster)
+            return ("Interview selection is saved through the recruiter decision in Review. " + reply, payload)
     interview_action = await _handle_interview_invitation(session, runtime, thread, last_user.content, messages)
     if interview_action is not None:
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
@@ -272,7 +300,13 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
     answering_question = (previous is not None and previous.role == "assistant" and
                           (previous.payload or {}).get("type") == "question" and
                           not last_user.content.strip().endswith("?"))
-    if _explicit_job_request(last_user.content) or answering_question:
+    pending_draft_edit = (thread.state == "awaiting_decision" and bool(re.search(
+        r"\b(?:add|include|remove|delete|change|update|modify|rewrite|regenerate|replace)\b",
+        last_user.content, re.I,
+    )))
+    if pending_draft_edit:
+        action = "edit_draft"
+    elif _explicit_job_request(last_user.content) or answering_question:
         action = "job_details"
     else:
         intent = await generate_structured(runtime.deps.llm, TurnIntent, system=INTENT_SYSTEM,
@@ -309,32 +343,9 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
 
 
 def _chat_interview_time(text: str, zone_name: str, now: datetime) -> datetime | None:
-    """Parse explicit ISO or today/tomorrow date plus a clock time; avoid guessing ambiguous dates."""
-    normalized = text.strip()
-    iso = re.search(r"\b(20\d{2}-\d{2}-\d{2})[ T]+(\d{1,2}:\d{2})(?:\s*(am|pm))?\b", normalized, re.I)
-    if iso:
-        try:
-            raw = f"{iso.group(1)} {iso.group(2)}"
-            parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-            if iso.group(3):
-                hour = parsed.hour % 12 + (12 if iso.group(3).lower() == "pm" else 0)
-                parsed = parsed.replace(hour=hour)
-            return parsed.replace(tzinfo=ZoneInfo(zone_name))
-        except (ValueError, ZoneInfoNotFoundError):
-            return None
-    day_text = re.search(r"\b(today|tomorrow)\b", normalized, re.I)
-    clock = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", normalized, re.I)
-    if not day_text or not clock:
-        return None
     try:
-        zone = ZoneInfo(zone_name)
-        date = now.astimezone(zone).date() + (timedelta(days=1) if day_text.group(1).lower() == "tomorrow" else timedelta())
-        hour = int(clock.group(1)) % 12 + (12 if clock.group(3).lower() == "pm" else 0)
-        minute = int(clock.group(2) or 0)
-        if hour > 23 or minute > 59:
-            return None
-        return datetime.combine(date, time(hour, minute), tzinfo=zone)
-    except (ValueError, ZoneInfoNotFoundError):
+        return parse_interview_time(text, zone_name, now)
+    except ZoneInfoNotFoundError:
         return None
 
 
@@ -354,6 +365,11 @@ async def _handle_interview_invitation(session: AsyncSession, runtime: ChatRunti
     previous = next((item for item in reversed(messages[:-1]) if item.role == "assistant"), None)
     prior = (previous.payload or {}) if previous else {}
     pending = prior.get("type") == "interview_schedule"
+    explicit_candidate = re.search(r"\bcandidate\s*0*(\d{1,6})\b", lowered)
+    if pending and explicit_candidate and prior.get("application_id"):
+        prior_application = await session.get(Application, uuid.UUID(prior["application_id"]))
+        if prior_application is None or prior_application.candidate_number != int(explicit_candidate.group(1)):
+            pending, prior = False, {}
     mode = prior.get("mode", "schedule") if pending else (
         "reschedule" if re.search(r"\b(?:reschedule|move)\b", lowered) else "schedule")
     wants_schedule = bool(re.search(r"\b(?:schedule|invite|send|reschedule|move)\b", lowered) and
@@ -472,6 +488,10 @@ async def _handle_interview_invitation(session: AsyncSession, runtime: ChatRunti
         if row is None:
             return f"candidate{int(label_match.group(1)):03d} is not currently approved for interview under {job.public_code}.", {"type": "candidate_work", "route": "/candidates?section=interview"}
         application, candidate = row
+        if pending and prior.get("application_id") != str(application.id):
+            # A newly named candidate starts a fresh request; never carry over the prior candidate's time.
+            pending, prior, candidate_email = False, {}, None
+            mode, zone_name, duration = ("reschedule" if re.search(r"\breschedule\b", lowered) else "schedule"), runtime.deps.settings.google_calendar_default_timezone, 30
         candidate_id, candidate_email = str(application.id), candidate.email
         if mode == "reschedule":
             active_interview = await session.scalar(select(InterviewSession).where(
@@ -482,6 +502,21 @@ async def _handle_interview_invitation(session: AsyncSession, runtime: ChatRunti
             if active_interview is None:
                 return f"{candidate.full_name} has no scheduled interview to reschedule.", {"type": "candidate_work", "route": "/interviews"}
             prior = {**prior, "mode": "reschedule", "interview_id": str(active_interview.id)}
+        else:
+            active_interview = await session.scalar(select(InterviewSession).where(
+                InterviewSession.application_id == application.id,
+                InterviewSession.owner_id == thread.owner_id)
+                .order_by(InterviewSession.created_at.desc()).limit(1))
+            if active_interview is not None:
+                if active_interview.status == "ended":
+                    return (f"{candidate.full_name} has already completed an interview. "
+                            "I won't create another invitation from a normal scheduling request. "
+                            "Open Interviews to review the completed session.",
+                            {"type": "candidate_work", "route": "/interviews"})
+                local = active_interview.scheduled_at.astimezone(ZoneInfo(active_interview.timezone_name))
+                return (f"{candidate.full_name} already has an interview on {local.strftime('%A, %B %d at %I:%M %p')} "
+                        f"({active_interview.timezone_name}). Say ‘reschedule candidate{application.candidate_number:03d}’ "
+                        "only if you want to change it.", {"type": "candidate_work", "route": "/interviews"})
     if candidate_email is None:
         email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", message)
         candidate_email = email.group(0).lower() if email else None
@@ -955,9 +990,37 @@ async def _decide(session: AsyncSession, runtime: ChatRuntime, thread: ChatThrea
     approval = await _pending_approval(session, thread.job_id)
     if approval is None:
         raise ConflictError("There is no draft waiting for a decision.")
+    edit_plan = None
+    if option == "edit":
+        version = await jobs.get_version(session, thread.job_id, approval.version)
+        base_profile = version.profile if version else None
+        if reason == REGENERATE_FEEDBACK:
+            edit_plan = JobEditPlan(full_rewrite=True).model_dump(mode="json")
+        else:
+            plan = await generate_structured(
+                runtime.deps.llm, JobEditPlan, system=job_prompts.EDIT_PLAN_SYSTEM,
+                user="Current draft (JSON):\n" + json.dumps(base_profile, ensure_ascii=False) +
+                     "\n\nRecruiter edit request (untrusted data):\n" +
+                     wrap_untrusted("recruiter_edit", reason or ""),
+            )
+            # A vague request must pause for specifics while leaving the current draft available.
+            if plan.clarification_question or (not plan.requirements_to_add and not plan.requirements_to_remove and
+                                               not plan.changed_fields and not plan.full_rewrite):
+                question = plan.clarification_question or "What exact item or JD section would you like me to change?"
+                latest_user = await session.scalar(select(ChatMessage).where(
+                    ChatMessage.thread_id == thread.id, ChatMessage.role == "user"
+                ).order_by(ChatMessage.created_at.desc()).limit(1))
+                original_request = (reason or "").split("\nRecruiter clarification:", 1)[0]
+                if latest_user is not None:
+                    latest_user.payload = {**(latest_user.payload or {}), "job_edit_waiting_for_details": True}
+                await session.commit()
+                return question, {"type": "question", "field": "job_edit_requirement_details",
+                                  "original_request": original_request, "options": []}
+            edit_plan = plan.model_dump(mode="json")
     await approvals.decide(session, approval_id=approval.id, expected_version=approval.version, option=option, reason=reason, actor_id=thread.owner_id)
     result = await resume_graph(WorkKind.JOB_DRAFT, thread_id=thread.active_run, run_id=str(uuid.uuid4()),
-                                checkpointer=runtime.checkpointer, decision={"option": option, "reason": reason})
+                                checkpointer=runtime.checkpointer, decision={"option": option, "reason": reason,
+                                                                           "edit_plan": edit_plan})
     if option != "approve":
         return await _interpret(session, runtime, thread, result)
     if result.get("error"):

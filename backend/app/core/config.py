@@ -104,9 +104,11 @@ class Settings(BaseSettings):
     rag_corpus_dir: Path = Path("/app/app/rag/corpora")
 
     # --- Speech-to-text (switchable) ---
-    stt_provider: Literal["faster_whisper", "google", "groq"] = "groq"
+    stt_provider: Literal["faster_whisper", "google", "groq", "assemblyai"] = "groq"
     groq_api_key: str = ""
     groq_whisper_model: str = "whisper-large-v3-turbo"
+    assemblyai_api_key: str = ""
+    assemblyai_streaming_model: str = "universal-streaming-english"
     stt_language: str = "en-US"
     google_application_credentials: str = "/run/secrets/google_stt.json"
     google_stt_model: str = "latest_long"
@@ -123,6 +125,14 @@ class Settings(BaseSettings):
     livekit_api_secret: str = "change_me_min_32_chars_long_secret"
     reconnect_grace_seconds: int = Field(default=60, ge=1)
 
+    @property
+    def livekit_client_url(self) -> str:
+        """Cloud deployments use one secure endpoint for both API and browser signaling."""
+        url = urlsplit(self.livekit_url)
+        if url.scheme == "wss" and url.hostname not in {"localhost", "127.0.0.1"}:
+            return self.livekit_url
+        return self.livekit_public_url
+
     # --- Invitations ---
     invite_delivery: Literal["smtp", "manual"] = "smtp"
     smtp_host: str = "mailpit"
@@ -134,6 +144,15 @@ class Settings(BaseSettings):
     interview_email_password: str = ""
     interview_smtp_host: str = "smtp.gmail.com"
     interview_smtp_port: int = 587
+
+    # --- Google Calendar remote MCP ---
+    google_calendar_client_secrets_file: Path = Path("/run/secrets/google_calendar/client_secret.json")
+    google_calendar_token_encryption_key: str = ""
+    google_calendar_redirect_uri: str = "http://localhost:8000/interviews/google-calendar/callback"
+    google_calendar_return_url: str = "http://localhost:5173/interviews?calendar_connected=1"
+    google_calendar_mcp_url: str = "https://calendarmcp.googleapis.com/mcp/v1"
+    google_calendar_project_id: str = ""
+    google_calendar_default_timezone: str = "Asia/Dhaka"
 
     # --- Worker ---
     worker_id: str = "worker-1"
