@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { JoinCredentials, sendAudioSegment } from "../api/interviews";
+import { AssemblyStream, startAssemblyStream } from "./assemblyaiStream";
 
 type PendingAudio = { id: string; start: string; end: string; blob: Blob };
 
@@ -30,6 +31,9 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
   const audioContextRef = useRef<AudioContext | null>(null);
   const pendingRef = useRef<PendingAudio[]>([]);
   const uploadingRef = useRef(false);
+  const assemblyRef = useRef<AssemblyStream | null>(null);
+  const assemblyStartingRef = useRef(false);
+  const microphoneRef = useRef<MediaStreamTrack | null>(null);
   const localRef = useRef<HTMLDivElement>(null);
   const remoteRef = useRef<HTMLDivElement>(null);
   const remoteAudioRef = useRef<HTMLDivElement>(null);
@@ -118,6 +122,34 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
     if (recorderRef.current?.state === "recording") recorderRef.current.stop();
   };
 
+  const beginTranscription = (audio?: MediaStreamTrack) => {
+    microphoneRef.current = audio ?? null;
+    if (credentials.stt_provider !== "assemblyai") { beginRecording(audio); return; }
+    if (!audio || !credentials.stt_token) { setTranscriptionWarning(true); return; }
+    recordingRequestedRef.current = true;
+    if (assemblyRef.current || assemblyStartingRef.current) return;
+    assemblyStartingRef.current = true;
+    void startAssemblyStream(audio, credentials.stt_token, () => {
+      setTranscriptionWarning(true);
+      const stream = assemblyRef.current;
+      assemblyRef.current = null;
+      if (stream) void stream.stop();
+    }).then((stream) => {
+      if (!recordingRequestedRef.current) void stream.stop();
+      else { assemblyRef.current = stream; setTranscriptionWarning(false); }
+    }).catch(() => setTranscriptionWarning(true))
+      .finally(() => { assemblyStartingRef.current = false; });
+  };
+
+  const stopTranscription = async () => {
+    if (credentials.stt_provider !== "assemblyai") { stopRecording(); return; }
+    recordingRequestedRef.current = false;
+    microphoneRef.current = null;
+    const stream = assemblyRef.current;
+    assemblyRef.current = null;
+    if (stream) await stream.stop();
+  };
+
   useEffect(() => {
     let closed = false;
     const room = new Room({ adaptiveStream: true, dynacast: true });
@@ -132,7 +164,10 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
     room.on(RoomEvent.TrackUnsubscribed, (track) => track.detach().forEach((element) => element.remove()));
     room.on(RoomEvent.Reconnecting, () => setConnection("Network interrupted · reconnecting…"));
     room.on(RoomEvent.Reconnected, () => { setConnection("Connected"); void flush(); });
-    room.on(RoomEvent.Disconnected, () => { if (!closed) setConnection("Disconnected · rejoin to continue"); });
+    room.on(RoomEvent.Disconnected, () => {
+      void stopTranscription();
+      if (!closed) setConnection("Disconnected · rejoin to continue");
+    });
 
     const connect = async () => {
       try {
@@ -142,18 +177,23 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
         const video = room.localParticipant.getTrackPublication(Track.Source.Camera)?.videoTrack;
         if (video) localRef.current?.replaceChildren(video.attach());
         const audio = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack;
-        beginRecording(audio);
+        beginTranscription(audio);
         setConnection("Connected");
       } catch (error) {
         setConnection(error instanceof Error ? error.message : "Could not connect to the interview.");
       }
     };
     void connect();
-    const timer = window.setInterval(() => void flush(), 3000);
+    const timer = window.setInterval(() => {
+      if (credentials.stt_provider === "assemblyai") {
+        if (recordingRequestedRef.current && !assemblyRef.current && !assemblyStartingRef.current)
+          beginTranscription(microphoneRef.current ?? undefined);
+      } else void flush();
+    }, 3000);
     return () => {
       closed = true;
       window.clearInterval(timer);
-      stopRecording();
+      void stopTranscription();
       room.disconnect();
       roomRef.current = null;
       localRef.current?.replaceChildren();
@@ -164,9 +204,9 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
 
   const toggleMic = async () => {
     const next = !mic;
-    if (!next) stopRecording();
+    if (!next) await stopTranscription();
     await roomRef.current?.localParticipant.setMicrophoneEnabled(next);
-    if (next) beginRecording(roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack);
+    if (next) beginTranscription(roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack);
     setMic(next);
   };
   const toggleCamera = async () => {
@@ -178,18 +218,18 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
     if (ending) return;
     setEnding(true);
     try {
-      stopRecording();
+      await stopTranscription();
       await new Promise((resolve) => window.setTimeout(resolve, 600));
       await flush();
       if (onEnd) await onEnd();
       roomRef.current?.disconnect();
     } catch (error) {
       setConnection(error instanceof Error ? error.message : "Could not end the interview. Try again.");
-      if (mic) beginRecording(roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack);
+      if (mic) beginTranscription(roomRef.current?.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack);
     } finally { setEnding(false); }
   };
   const leave = async () => {
-    stopRecording();
+    await stopTranscription();
     await new Promise((resolve) => window.setTimeout(resolve, 600));
     await flush();
     roomRef.current?.disconnect();
@@ -209,7 +249,7 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
       {onEnd && <button type="button" className="danger-button" disabled={ending} onClick={() => void end()}>{ending ? "Ending…" : "End interview"}</button>}
       <button type="button" className="secondary" onClick={() => void leave()}>{connection.startsWith("Disconnected") ? "Rejoin options" : "Leave call"}</button>
     </div>}
-    {transcriptionWarning && <p className="error" role="alert">Transcription is delayed. The call continues and queued audio retries while this page stays open. A long outage may leave a gap in the transcript.</p>}
+    {transcriptionWarning && <p className="error" role="alert">Transcription is delayed. The call continues and transcription will reconnect while this page stays open. A long outage may leave a gap in the transcript.</p>}
   </div>;
 });
 
