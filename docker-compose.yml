@@ -59,6 +59,11 @@ services:
   worker:
     <<: *backend
     command: ["python", "-m", "app.worker.cv_runner"]
+    volumes:
+      - hc_logs:/app/logs
+      - hc_errors:/app/errors
+      - hc_files:/app/storage
+      - ./backend/app/rag/corpora:/app/app/rag/corpora
     healthcheck:
       disable: true
     environment:

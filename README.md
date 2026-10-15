@@ -99,4 +99,8 @@ The maintained [feature-to-code map](docs/feature-code-map.md) links each screen
 | CV worker and backend tests | `backend/app/worker/`, `backend/tests/` |
 | Startup and interview setup | `docker-compose.yml`, `scripts/` |
 
-LG5 interview analysis and LG6 consolidated assessment are planned. The current F5 implementation hands off the latest completed transcript for later analysis.
+LG5 interview analysis uses the latest handed-off transcript, saved job requirements, a separate F5 graph, and recruiter review. LG6 consolidated assessment remains a later feature.
+
+### F5 technical references
+
+Place recruiter-approved `.pdf`, `.md`, or `.txt` files in `backend/app/rag/corpora/technical/` and restart the worker, or run `python -m app.rag.ingest --namespace technical` inside the backend environment. The worker imports this folder on startup. The included Python basics document is **sample material**, so F5 treats scores relying only on it or the AI's general knowledge as provisional. Replace or extend it with reviewed source material before using verified technical scores in hiring decisions. Each F5 result preserves transcript evidence, cited reference passages, rubric scores, and a provisional label where applicable.
