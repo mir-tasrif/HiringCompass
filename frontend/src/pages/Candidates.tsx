@@ -1,23 +1,11 @@
+// Candidate pipeline page: stage navigation, CV batches, recruiter review, and F5 handoff display.
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { actOnCandidateCvs, cancelCvBatchItem, CandidateAction, CandidateCv, CandidateSection, CvBatch,
   decideCandidateReview, getCvBatch, getF2Weights, listActiveCvBatches, listCandidateCvs, retryCvBatchItem, startCvBatch, startF2Batch } from "../api/candidates";
 import { loadCvPreview } from "../api/jobs";
-
-const sections: { id: CandidateSection; label: string; active: boolean }[] = [
-  { id: "uploaded", label: "Uploaded CV", active: true },
-  { id: "integrity", label: "Integrity Check", active: true },
-  { id: "parsed", label: "Parsed CV", active: true },
-  { id: "ranking", label: "Feature 1 Ranking", active: true },
-  { id: "scoring", label: "Feature 2 Scoring", active: true },
-  { id: "interview", label: "Selected for Interview", active: true },
-  { id: "assessment", label: "Feature 6 Assessment", active: false },
-  { id: "f5", label: "F5 QA Analysis", active: true },
-  { id: "review", label: "Review", active: true },
-  { id: "rejected", label: "Rejected", active: true },
-];
-const activeSections = new Set<CandidateSection>(sections.filter((item) => item.active).map((item) => item.id));
+import CandidateStageNav, { activeCandidateStages, candidateStages } from "../components/CandidateStageNav";
 
 function formatBytes(bytes: number) {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -35,7 +23,7 @@ export default function Candidates() {
   const [searchParams] = useSearchParams();
   const jobFilter = searchParams.get("jobId");
   const sectionParam = searchParams.get("section") as CandidateSection | null;
-  const [section, setSection] = useState<CandidateSection>(sectionParam && activeSections.has(sectionParam) ? sectionParam : "uploaded");
+  const [section, setSection] = useState<CandidateSection>(sectionParam && activeCandidateStages.has(sectionParam) ? sectionParam : "uploaded");
   const [items, setItems] = useState<CandidateCv[]>([]);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -258,7 +246,7 @@ export default function Candidates() {
 
   const activePreview = items.find((item) => item.id === previewId);
   const allSelected = selectableItems.length > 0 && selectableItems.slice(0, selectionLimit).every((item) => selected.has(item.id));
-  const title = sections.find((item) => item.id === section)?.label ?? "Candidates";
+  const title = candidateStages.find((item) => item.id === section)?.label ?? "Candidates";
   const recentBatches = Object.values(batches).sort((a, b) => b.created_at.localeCompare(a.created_at));
   const displayedBatch = recentBatches.find((batch) => ["queued", "processing"].includes(batch.status))
     ?? recentBatches.find((batch) => batch.status === "waiting_review") ?? recentBatches[0];
@@ -277,13 +265,9 @@ export default function Candidates() {
 
   return <div className="candidates-page">
     <header className="page-heading"><div><p className="eyebrow">TALENT PIPELINE</p><h1>Candidates</h1><p className="muted">Review CV evidence and move candidates through the hiring stages.</p></div></header>
-    <nav className="candidate-sections" aria-label="Candidate pipeline sections">
-      {sections.map((item) => <button key={item.id} type="button" className={`candidate-section${item.id === section ? " active" : ""}${item.active ? "" : " upcoming"}`}
-        disabled={!item.active} onClick={() => { setSection(item.id); setSelected(new Set()); setNotice(null); setError(null); }} aria-current={item.id === section ? "page" : undefined}
-        title={item.active ? undefined : "This pipeline step will be available in a future update."}>
-        <span>{item.label}</span>{!item.active && <small>Coming soon</small>}
-      </button>)}
-    </nav>
+    <CandidateStageNav section={section} onSelect={(next) => {
+      setSection(next); setSelected(new Set()); setNotice(null); setError(null);
+    }} />
     <div className="candidate-section-heading"><div><h2>{title}</h2><p className="muted">{section === "uploaded" ? "Select up to 20 CVs to run text extraction, F11 integrity checks, and profile parsing." : section === "integrity" ? "Processing status and saved integrity outcomes. Flagged CVs also appear in Review for a recruiter decision." : section === "parsed" ? "Parsed candidate profiles ready for Feature 1 screening." : section === "ranking" ? "Evidence-based requirement matches and per-job batch rankings." : section === "scoring" ? "Select up to 20 F1-approved CVs from one job, confirm scoring weights, and review saved F2 evidence." : section === "review" ? "Integrity, F1, and F2 results awaiting a recruiter decision." : section === "interview" ? "Candidates approved after F2 for the interview stage." : section === "f5" ? "CVs and their latest completed interview transcripts are ready for future F5 analysis." : section === "rejected" ? "Rejected or deleted CVs and their recorded reasons." : "Candidate records for this pipeline stage."}</p></div>
       <label className="candidate-search"><span className="sr-only">Search candidates</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by job or candidate" /></label>
     </div>

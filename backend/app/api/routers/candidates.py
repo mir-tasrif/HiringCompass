@@ -4,146 +4,28 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_interviewer
+from app.api.schemas.candidates import (CandidateActionBody, CandidateActionOut, CandidateCvOut, CandidateEventOut,
+                                        StartBatchBody, StartScoringBody, ScoringWeightsOut, BatchItemOut, BatchOut,
+                                        StartBatchesOut, RetryOut, ReviewDecisionBody, ReviewDecisionOut)
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db.models import (Application, ApplicationEvent, AuditEvent, Candidate, CandidateProfile, CandidateScreening,
-                           CandidateScore, CvBatch, CvBatchItem, Document, F5Handoff, Job, User)
+                           CandidateScore, CvBatch, CvBatchItem, Document, Job, User)
 from app.db.session import SessionLocal, get_session
 from app.services.f2_batches import start_f2_batch
 from app.services.f2_policy import suggested_weights
-from app.services.cv_tasks import _event, _finalize_batch, _recompute_job_ranks, refresh_batch_status
-from app.services.f5_handoff import latest_transcript_session
+from app.services.cv_stage_events import record_stage_event as _event
+from app.services.cv_tasks import finalize_batch, recompute_job_ranks, refresh_batch_status
+from app.services.candidate_queries import list_candidate_cvs as query_candidate_cvs
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 _SECTIONS = {"uploaded", "integrity", "parsed", "ranking", "scoring", "interview", "assessment", "f5", "review", "rejected"}
-
-
-class CandidateEventOut(BaseModel):
-    action: str
-    from_stage: str
-    to_stage: str
-    reason: str
-    created_at: datetime
-
-
-class CandidateCvOut(BaseModel):
-    id: uuid.UUID
-    job_id: uuid.UUID
-    job_code: str
-    job_title: str
-    job_version: int
-    candidate_number: int
-    candidate_name: str
-    candidate_email: str | None = None
-    source: str
-    original_filename: str | None
-    converted_from_docx: bool
-    size_bytes: int
-    uploaded_at: datetime
-    stage: str
-    rejection_action: str | None = None
-    rejection_reason: str | None = None
-    rejected_from_stage: str | None = None
-    rejected_at: datetime | None = None
-    events: list[CandidateEventOut] = Field(default_factory=list)
-    parsed_profile: dict | None = None
-    integrity_verdict: str | None = None
-    integrity_signals: list[dict] = Field(default_factory=list)
-    extraction_method: str | None = None
-    screening: dict | None = None
-    scoring: dict | None = None
-    integrity_task_id: uuid.UUID | None = None
-    integrity_task_status: str | None = None
-    integrity_task_error: str | None = None
-    ranking_task_id: uuid.UUID | None = None
-    ranking_task_status: str | None = None
-    ranking_task_error: str | None = None
-    ranking_task_next_attempt_at: datetime | None = None
-    scoring_task_id: uuid.UUID | None = None
-    scoring_task_status: str | None = None
-    scoring_task_error: str | None = None
-    scoring_task_next_attempt_at: datetime | None = None
-    f5_interview_id: uuid.UUID | None = None
-    f5_interview_ended_at: datetime | None = None
-
-
-class CandidateActionBody(BaseModel):
-    application_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
-    action: Literal["delete", "reject", "permanent_delete"]
-    reason: str = Field(min_length=1, max_length=2000)
-
-
-class CandidateActionOut(BaseModel):
-    rejected_ids: list[uuid.UUID]
-
-
-class StartBatchBody(BaseModel):
-    application_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
-
-
-class StartScoringBody(StartBatchBody):
-    weights: dict[str, int]
-    rescore: bool = False
-
-
-class ScoringWeightsOut(BaseModel):
-    job_id: uuid.UUID
-    job_code: str
-    weights: dict[str, int]
-    policy_version: int | None
-
-
-class BatchItemOut(BaseModel):
-    id: uuid.UUID
-    application_id: uuid.UUID
-    status: str
-    attempts: int
-    error: str | None
-    next_attempt_at: datetime | None
-    candidate_label: str | None = None
-
-
-class BatchOut(BaseModel):
-    id: uuid.UUID
-    created_at: datetime
-    kind: str
-    status: str
-    total: int
-    completed: int
-    failed: int
-    waiting_review: int
-    rejected: int
-    cancelled: int
-    items: list[BatchItemOut]
-
-
-class StartBatchesOut(BaseModel):
-    batches: list[BatchOut]
-
-
-class RetryOut(BaseModel):
-    id: uuid.UUID
-    batch_id: uuid.UUID
-    status: str
-
-
-class ReviewDecisionBody(BaseModel):
-    decision: Literal["approve", "reject"]
-    reason: str = Field(default="", max_length=2000)
-
-
-class ReviewDecisionOut(BaseModel):
-    application_id: uuid.UUID
-    stage: str
-    decision: str
 
 
 def _batch_out(batch: CvBatch, items: list[CvBatchItem], labels: dict[uuid.UUID, str] | None = None) -> BatchOut:
@@ -175,117 +57,7 @@ async def list_candidate_cvs(
 ) -> list[CandidateCvOut]:
     if section not in _SECTIONS:
         raise HTTPException(status_code=422, detail="Unknown candidate pipeline section.")
-    statement = (select(Application, Candidate, Document, Job, CandidateProfile, CandidateScreening)
-        .join(Candidate, Candidate.id == Application.candidate_id)
-        .join(Document, Document.application_id == Application.id)
-        .join(Job, Job.id == Application.job_id)
-        .outerjoin(CandidateProfile, CandidateProfile.application_id == Application.id)
-        .outerjoin(CandidateScreening, CandidateScreening.application_id == Application.id)
-        .where(Job.owner_id == user.id, Job.active_version.is_not(None)))
-    if section == "uploaded":
-        statement = statement.where(Application.stage == "uploaded")
-    elif section == "integrity":
-        statement = statement.where(or_(
-            Application.stage == "integrity_check",
-            CandidateProfile.integrity_verdict.is_not(None),
-            and_(Application.stage == "rejected", Application.rejected_from_stage == "integrity_check"),
-        ))
-    elif section == "parsed":
-        statement = statement.where(Application.stage == "parsed")
-    elif section == "ranking":
-        statement = statement.where(or_(Application.stage == "ranking",
-            and_(CandidateScreening.id.is_not(None), CandidateScreening.mandatory_pass.is_(True))))
-    elif section == "scoring":
-        statement = statement.where(Application.stage.in_(["scoring", "scoring_processing", "f2_review", "interview_selection"]))
-    elif section == "review":
-        statement = statement.where(Application.stage.in_(["integrity_review", "f1_review", "f2_review"]))
-    elif section == "rejected":
-        statement = statement.where(Application.stage == "rejected")
-    elif section == "f5":
-        statement = statement.join(F5Handoff, F5Handoff.application_id == Application.id)
-    else:
-        target = {"interview": "interview_selection", "assessment": "assessed"}[section]
-        statement = statement.where(Application.stage == target)
-    if section == "ranking":
-        statement = statement.order_by(Job.public_code.asc(), CandidateScreening.rank.asc().nulls_last(),
-                                       CandidateScreening.suitability_score.desc(), Application.created_at.desc())
-    else:
-        statement = statement.order_by(Application.created_at.desc(), Application.id)
-    rows = (await session.execute(statement)).all()
-    if not rows:
-        return []
-    ids = [application.id for application, *_ in rows]
-    event_rows = (await session.execute(select(ApplicationEvent).where(ApplicationEvent.application_id.in_(ids))
-                    .order_by(ApplicationEvent.created_at.desc(), ApplicationEvent.id))).scalars().all()
-    task_rows = (await session.execute(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
-                    .where(CvBatchItem.application_id.in_(ids), CvBatch.kind == "integrity_parse")
-                    .order_by(CvBatchItem.created_at.desc(), CvBatchItem.id))).scalars().all()
-    integrity_tasks: dict[uuid.UUID, CvBatchItem] = {}
-    for task in task_rows:
-        integrity_tasks.setdefault(task.application_id, task)
-    scoring_rows = (await session.execute(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
-                    .where(CvBatchItem.application_id.in_(ids), CvBatch.kind == "scoring")
-                    .order_by(CvBatchItem.created_at.desc(), CvBatchItem.id.desc()))).scalars().all()
-    scoring_tasks: dict[uuid.UUID, CvBatchItem] = {}
-    for task in scoring_rows:
-        scoring_tasks.setdefault(task.application_id, task)
-    ranking_rows = (await session.execute(select(CvBatchItem).join(CvBatch, CvBatch.id == CvBatchItem.batch_id)
-                    .where(CvBatchItem.application_id.in_(ids), CvBatch.kind == "ranking")
-                    .order_by(CvBatchItem.created_at.desc(), CvBatchItem.id.desc()))).scalars().all()
-    ranking_tasks: dict[uuid.UUID, CvBatchItem] = {}
-    for task in ranking_rows:
-        ranking_tasks.setdefault(task.application_id, task)
-    score_rows = list(await session.scalars(select(CandidateScore).where(CandidateScore.application_id.in_(ids))
-        .order_by(CandidateScore.created_at.desc(), CandidateScore.id.desc())))
-    current_scores: dict[uuid.UUID, CandidateScore] = {}
-    for score in score_rows:
-        current_scores.setdefault(score.application_id, score)
-    events: dict[uuid.UUID, list[CandidateEventOut]] = {}
-    for event in event_rows:
-        events.setdefault(event.application_id, []).append(CandidateEventOut(action=event.action,
-            from_stage=event.from_stage, to_stage=event.to_stage, reason=event.reason, created_at=event.created_at))
-    result = []
-    for application, candidate, document, job, parsed, screening in rows:
-        f5_interview = await latest_transcript_session(session, application.id) if section == "f5" else None
-        if section == "f5" and f5_interview is None:
-            continue
-        screening_data = None if screening is None else {
-            "suitability_score": screening.suitability_score, "mandatory_pass": screening.mandatory_pass,
-            "requirements": screening.requirements, "explanation": screening.explanation, "rank": screening.rank,
-        }
-        result.append(CandidateCvOut(id=application.id, job_id=job.id, job_code=job.public_code or "",
-            job_title=job.title, job_version=application.job_version, candidate_number=application.candidate_number,
-            candidate_name=candidate.full_name, candidate_email=candidate.email,
-            f5_interview_id=f5_interview.id if f5_interview else None,
-            f5_interview_ended_at=f5_interview.ended_at if f5_interview else None,
-            source=application.source, original_filename=document.original_filename,
-            converted_from_docx=document.status == "converted_from_docx", size_bytes=document.size_bytes,
-            uploaded_at=document.created_at, stage=application.stage, rejection_action=application.rejection_action,
-            rejection_reason=application.rejection_reason, rejected_from_stage=application.rejected_from_stage,
-            rejected_at=application.rejected_at, events=events.get(application.id, []),
-            parsed_profile=parsed.profile if parsed and parsed.profile else None,
-            integrity_verdict=parsed.integrity_verdict if parsed else None,
-            integrity_signals=parsed.integrity_signals if parsed else [],
-            extraction_method=parsed.extraction_method if parsed else None, screening=screening_data,
-            scoring=({"aggregate_score": current_scores[application.id].aggregate_score,
-                      "dimensions": current_scores[application.id].dimensions,
-                      "weights": current_scores[application.id].weights,
-                      "policy_version": current_scores[application.id].policy_version,
-                      "model_name": current_scores[application.id].model_name,
-                      "scored_at": current_scores[application.id].created_at.isoformat()}
-                     if application.id in current_scores else None),
-            integrity_task_id=integrity_tasks[application.id].id if application.id in integrity_tasks else None,
-            integrity_task_status=integrity_tasks[application.id].status if application.id in integrity_tasks else None,
-            integrity_task_error=integrity_tasks[application.id].error if application.id in integrity_tasks else None,
-            ranking_task_id=ranking_tasks[application.id].id if application.id in ranking_tasks else None,
-            ranking_task_status=ranking_tasks[application.id].status if application.id in ranking_tasks else None,
-            ranking_task_error=ranking_tasks[application.id].error if application.id in ranking_tasks else None,
-            ranking_task_next_attempt_at=ranking_tasks[application.id].next_attempt_at if application.id in ranking_tasks else None,
-            scoring_task_id=scoring_tasks[application.id].id if application.id in scoring_tasks else None,
-            scoring_task_status=scoring_tasks[application.id].status if application.id in scoring_tasks else None,
-            scoring_task_error=scoring_tasks[application.id].error if application.id in scoring_tasks else None,
-            scoring_task_next_attempt_at=scoring_tasks[application.id].next_attempt_at if application.id in scoring_tasks else None))
-    return result
+    return await query_candidate_cvs(session, user.id, section)
 
 
 async def _start_batches(session: AsyncSession, user: User, body: StartBatchBody, kind: str) -> StartBatchesOut:
@@ -423,7 +195,7 @@ async def cancel_batch_item(item_id: uuid.UUID, user: User = Depends(get_current
     item.status, item.error, item.next_attempt_at, item.lease_expires_at = "cancelled", None, None, None
     await refresh_batch_status(session, batch.id)
     await session.commit()
-    await _finalize_batch(SessionLocal, batch.id)
+    await finalize_batch(SessionLocal, batch.id)
     return RetryOut(id=item.id, batch_id=batch.id, status=item.status)
 
 
@@ -500,9 +272,9 @@ async def decide_candidate_review(application_id: uuid.UUID, body: ReviewDecisio
         raise HTTPException(status_code=409, detail="This CV is not waiting for a recruiter decision.")
     await session.commit()
     if finalize_batch_id:
-        await _finalize_batch(SessionLocal, finalize_batch_id)
+        await finalize_batch(SessionLocal, finalize_batch_id)
     if screening is not None and next_stage == "rejected":
-        await _recompute_job_ranks(session, application.job_id)
+        await recompute_job_ranks(session, application.job_id)
         await session.commit()
     return ReviewDecisionOut(application_id=application.id, stage=next_stage, decision=body.decision)
 
@@ -579,6 +351,6 @@ async def act_on_candidate_cvs(body: CandidateActionBody, user: User = Depends(g
         await refresh_batch_status(session, item.batch_id)
     await session.commit()
     for batch_id in finalize_ids:
-        await _finalize_batch(SessionLocal, batch_id)
+        await finalize_batch(SessionLocal, batch_id)
     return CandidateActionOut(rejected_ids=[application.id for application in rows])
 
