@@ -1,6 +1,6 @@
 # HiringCompass feature-to-code map
 
-This map follows the currently implemented paths. Start at the page, then follow its API router, service or graph, and persisted data. The architecture diagrams describe the original plan; LG5 analysis and LG6 assessment are not yet implemented as LangGraphs.
+This map follows the currently implemented paths. Start at the page, then follow its API router, service or graph, and persisted data. LG5 interview Q&A analysis is implemented; LG6 consolidated assessment remains planned.
 
 | Functionality | Screen | API entry | Main implementation | Data and external systems |
 | --- | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ This map follows the currently implemented paths. Start at the page, then follow
 | Manual scheduling and invitations | `frontend/src/pages/Interviews.tsx` | `backend/app/api/routers/interviews.py`, `backend/app/api/routers/calendar_connection.py` | `backend/app/services/interviews.py`, `backend/app/services/google_calendar_auth.py`, `backend/app/services/google_calendar_mcp.py` | `InterviewSession`, `GoogleCalendarConnection`; Calendar MCP/API, SMTP, public web URL |
 | Private video interview | `frontend/src/pages/InterviewRoom.tsx`, `frontend/src/components/InterviewCall.tsx` | `backend/app/api/routers/interviews.py` | `backend/app/services/interviews.py` | LiveKit Cloud room/token; interview status and admission |
 | English transcription and interview assistant | `frontend/src/components/assemblyaiStream.ts`, `frontend/src/pages/InterviewRoom.tsx` | `backend/app/api/routers/interviews.py`, `backend/app/api/routers/interview_stream.py` | `backend/app/services/interviews.py`, `backend/app/services/interview_ai.py`, interview prompts in `backend/app/prompts/system.py` | `InterviewTurn`; AssemblyAI or configured fallback STT, LLM assistant |
-| F5 transcript handoff | `frontend/src/pages/Interviews.tsx`, `frontend/src/pages/Candidates.tsx` | `backend/app/api/routers/interviews.py`, `backend/app/api/routers/candidates.py` | `backend/app/services/f5_handoff.py` | `F5Handoff`, latest completed interview transcript; full F5 analysis is future work |
+| F5 transcript handoff and analysis | `frontend/src/pages/Interviews.tsx`, `frontend/src/pages/Candidates.tsx`, `frontend/src/components/F5AnalysisPanel.tsx`, `frontend/src/pages/Assistant.tsx` | `backend/app/api/routers/interviews.py`, `backend/app/api/routers/f5_analysis.py`, `backend/app/api/routers/chat.py` | `backend/app/services/f5_handoff.py`, `backend/app/services/f5_analysis.py`, `backend/app/services/f5_worker.py`, `backend/app/services/f5_chat.py`, `backend/app/graphs/f5_interview_analysis/graph.py` | `F5Handoff`, `F5Batch`, `F5Run`; technical RAG, transcript and reference evidence, recruiter review |
 
 The API contract classes for candidate and interview endpoints live in `backend/app/api/schemas/candidates.py` and `backend/app/api/schemas/interviews.py`. Database entities are currently declared in `backend/app/db/models.py`. Graph registration and durable execution are in `backend/app/graphs/orchestrator.py`; graph construction happens at API startup in `backend/app/main.py` and in the CV worker at `backend/app/worker/cv_runner.py`. System prompt text and versions are in `backend/app/prompts/system.py`; CV profile, F1, and F2 user-message builders are in `backend/app/prompts/user_messages.py`.
 
