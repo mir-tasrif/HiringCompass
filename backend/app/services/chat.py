@@ -28,6 +28,7 @@ from app.services import approvals, jobs
 from app.services.postings import post_to_discord
 from app.services.interview_chat import handle_interview_chat, roster_reply, selected_roster
 from app.services.interview_scheduling import handle_interview_invitation as _handle_interview_invitation
+from app.services.f5_chat import handle_f5_chat
 from app.services.chat_threads import create_thread, get_owned_thread, list_threads, list_messages, build_transcript
 from app.services.chat_job_status import job_activity_context as _job_activity_context
 from app.services.chat_candidate_actions import (_handle_candidate_work_request,
@@ -176,11 +177,17 @@ async def _handle_text(session: AsyncSession, runtime: ChatRuntime, thread: Chat
         if thread.state == "awaiting_decision":
             return await _decide(session, runtime, thread, "approve", None)
         return "There is no draft ready to approve yet. Ask me to create a job description first.", {"type": "text"}
+    previous_payload = (previous_assistant.payload or {}) if previous_assistant else {}
+    f5_action = await handle_f5_chat(session, thread.owner_id, thread.job_id, last_user.content,
+                                     (previous_assistant.payload or {}) if previous_assistant else {})
+    if f5_action is not None:
+        last_user.payload = {**(last_user.payload or {}), "job_details": False}
+        await session.commit()
+        return f5_action
     if _is_job_status_question(last_user.content):
         last_user.payload = {**(last_user.payload or {}), "job_details": False}
         await session.commit()
         return await _job_update(session, runtime, thread)
-    previous_payload = (previous_assistant.payload or {}) if previous_assistant else {}
     batch_action = await handle_interview_chat(session, runtime.deps.settings, thread.owner_id,
                                                thread.job_id, last_user.content, previous_payload)
     if batch_action is not None:

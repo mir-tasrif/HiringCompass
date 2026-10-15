@@ -265,6 +265,18 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
 .cv-batch progress { width: 100%; height: 8px; accent-color: var(--accent); }
 .cv-batch-failure { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--bad); font-size: .82rem; }
 .cv-batch-item { color: var(--muted); font-size: .82rem; }
+.f5-workspace { display: grid; gap: 11px; padding: 14px; }
+.f5-workspace h4 { margin: 8px 0 4px; }
+.f5-roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 7px; }
+.f5-roster label { display: flex; gap: 7px; align-items: center; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; font-size: .82rem; }
+.f5-run-list { display: flex; gap: 6px; flex-wrap: wrap; max-height: 130px; overflow: auto; }
+.f5-run-list button { max-width: 260px; text-align: left; white-space: normal; font-size: .78rem; }
+.f5-result { display: grid; gap: 7px; max-height: 58vh; overflow: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.f5-result p, .f5-result li { font-size: .82rem; overflow-wrap: anywhere; }
+.f5-result details { border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.f5-result details .history-event { margin-top: 7px; }
+.f5-result select[multiple], .f5-result textarea { display: block; width: 100%; min-height: 76px; margin: 5px 0 8px; }
+.f5-result .candidate-actions { flex-wrap: wrap; align-items: center; }
 .candidate-profile { display: grid; gap: 12px; padding: 16px; border-top: 1px solid var(--border); }
 .candidate-profile h3, .candidate-profile h4 { margin: 0 0 6px; }
 .candidate-profile pre { overflow: auto; max-height: 240px; margin: 0; padding: 10px; border-radius: 8px; background: var(--bg); color: var(--text); white-space: pre-wrap; font: .78rem/1.45 ui-monospace, Consolas, monospace; }

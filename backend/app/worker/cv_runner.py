@@ -17,6 +17,7 @@ from app.llm.client import get_llm_client
 from app.llm.embeddings import make_embed_fn
 from app.rag.store import KnowledgeStore
 from app.services.cv_tasks import run_cv_worker
+from app.services.f5_worker import run_f5_worker
 
 
 async def main() -> None:
@@ -32,7 +33,10 @@ async def main() -> None:
         scoring_graph = graph_registry.get(WorkKind.SCORING, checkpointer)
         screening_graph = graph_registry.get(WorkKind.APPLICATION_SCREENING, checkpointer)
         integrity_graph = graph_registry.get(WorkKind.INTEGRITY_CHECK, checkpointer)
-        await run_cv_worker(SessionLocal, settings, llm, store, scoring_graph, screening_graph, integrity_graph)
+        await asyncio.gather(
+            run_cv_worker(SessionLocal, settings, llm, store, scoring_graph, screening_graph, integrity_graph),
+            run_f5_worker(SessionLocal, settings, llm, store, checkpointer),
+        )
 
 
 if __name__ == "__main__":

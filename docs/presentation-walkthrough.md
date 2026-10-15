@@ -34,7 +34,8 @@ Use this alongside [the feature-to-code map](feature-code-map.md). Each step nam
 
 1. `frontend/src/pages/Interviews.tsx` offers transcript viewing and handoff. The handoff endpoint is in `backend/app/api/routers/interviews.py`.
 2. `backend/app/services/f5_handoff.py` identifies the latest completed interview transcript. `frontend/src/pages/Candidates.tsx` shows the candidate as ready for F5.
-3. F5 question-and-answer analysis and F6 consolidated assessment remain planned work; the current handoff does not imply that those analysis graphs have run.
+3. `frontend/src/components/F5AnalysisPanel.tsx` starts a multi-candidate F5 batch; the same operation can be requested through chat with a confirmation preview. `backend/app/services/f5_worker.py` runs the independent graph in `backend/app/graphs/f5_interview_analysis/graph.py`.
+4. The graph segments Q&A, maps job requirements, retrieves approved technical references, and records four dimensions with transcript evidence. Missing approved references produce a labelled provisional overall score. Review can approve for F6, request reanalysis, or reject the candidate. LG6 assessment remains planned.
 
 ## Preserving behavior while reorganizing
 

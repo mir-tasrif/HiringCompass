@@ -24,6 +24,7 @@ from app.api.routers.candidates import router as candidates_router
 from app.api.routers.interviews import router as interviews_router
 from app.api.routers.calendar_connection import router as calendar_connection_router
 from app.api.routers.interview_stream import router as interview_stream_router
+from app.api.routers.f5_analysis import router as f5_router
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.graph import register_job_graph
 from app.graphs.orchestrator import registry
@@ -94,6 +95,7 @@ app.include_router(candidates_router)
 app.include_router(calendar_connection_router)
 app.include_router(interviews_router)
 app.include_router(interview_stream_router)
+app.include_router(f5_router)
 
 
 # Liveness endpoint used by Docker healthchecks.
