@@ -258,6 +258,38 @@ class F5Handoff(Base, IdMixin, TimestampMixin):
     requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
 
 
+# Durable F5 batch; candidates from different jobs may be analysed together.
+class F5Batch(Base, IdMixin, TimestampMixin):
+    __tablename__ = "f5_batches"
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_threads.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
+
+
+# One immutable input snapshot and its evidence-backed, reviewable F5 result.
+class F5Run(Base, IdMixin, TimestampMixin):
+    __tablename__ = "f5_runs"
+    __table_args__ = (Index("ix_f5_runs_status_created", "status", "created_at"),
+                      Index("ix_f5_runs_application_created", "application_id", "created_at"))
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("f5_batches.id", ondelete="CASCADE"))
+    application_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("applications.id", ondelete="CASCADE"))
+    interview_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("interview_sessions.id", ondelete="CASCADE"))
+    job_version: Mapped[int] = mapped_column(Integer)
+    transcript: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    segment_overrides: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    corrections: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", server_default="queued")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_status: Mapped[str] = mapped_column(String(30), default="pending", server_default="pending")
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 # Append-only stage and rejection history for each application.
 class ApplicationEvent(Base, IdMixin):
     __tablename__ = "application_events"
