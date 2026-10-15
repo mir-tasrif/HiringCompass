@@ -12,17 +12,21 @@ export interface Interview {
   candidate_profile: Record<string, unknown> | null;
   f1: { score: number; requirements: unknown[] } | null;
   f2: { score: number; dimensions: { key: string; score: number; justification: string; missing?: boolean }[] } | null;
+  transcript_turn_count: number;
+  f5_ready: boolean;
 }
 
 export interface GuestStatus {
   session_id: string; job_title: string; candidate_name: string; scheduled_at: string;
   timezone_name: string; status: string; admitted: boolean; started: boolean;
 }
-export interface JoinCredentials { url: string; token: string; room: string; role: string }
+export interface JoinCredentials { url: string; token: string; room: string; role: string; stt_provider: string; stt_token: string | null }
 export interface TranscriptTurn { id: string; role: string; started_at: string; ended_at: string; text: string }
 export interface CalendarConnection { connected: boolean; account_email: string | null; authorization_url?: string | null }
 
 export const listInterviews = (): Promise<Interview[]> => apiFetch("/interviews");
+export const sendInterviewToF5 = (id: string): Promise<Interview> =>
+  apiFetch(`/interviews/${id}/send-to-f5`, { method: "POST" });
 export const googleCalendarStatus = (): Promise<CalendarConnection> => apiFetch("/interviews/google-calendar/status");
 export const connectGoogleCalendar = (): Promise<CalendarConnection> =>
   apiFetch("/interviews/google-calendar/connect", { method: "POST" });
