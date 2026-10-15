@@ -22,12 +22,15 @@ from app.api.routers.chat import router as chat_router
 from app.api.routers.jobs import router as jobs_router
 from app.api.routers.candidates import router as candidates_router
 from app.api.routers.interviews import router as interviews_router
+from app.api.routers.calendar_connection import router as calendar_connection_router
+from app.api.routers.interview_stream import router as interview_stream_router
 from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.graph import register_job_graph
 from app.graphs.orchestrator import registry
 from app.llm.embeddings import make_embed_fn
 from app.rag.store import KnowledgeStore
 from app.services.chat import ChatRuntime, recover_interrupted_threads
+from app.services.interviews import refresh_pending_invitation_links
 
 settings = get_settings()
 logger = get_logger("app.main")
@@ -40,6 +43,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("api starting", extra={"env": settings.app_env})
     async with SessionLocal() as session:
         await ensure_seed_interviewer(session, settings)
+    replaced_invites = await refresh_pending_invitation_links(SessionLocal, settings)
+    if replaced_invites:
+        logger.info("pending invitations updated for the current public hostname",
+                    extra={"count": replaced_invites})
     async with open_checkpointer() as checkpointer:
         llm = get_llm_client()
         deps = JobGraphDeps(llm=llm, store=KnowledgeStore(make_embed_fn(llm, settings), settings), session_factory=SessionLocal, settings=settings)
@@ -84,7 +91,9 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(jobs_router)
 app.include_router(candidates_router)
+app.include_router(calendar_connection_router)
 app.include_router(interviews_router)
+app.include_router(interview_stream_router)
 
 
 # Liveness endpoint used by Docker healthchecks.

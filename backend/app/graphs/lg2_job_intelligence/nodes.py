@@ -17,6 +17,7 @@ from app.graphs.lg2_job_intelligence.deps import JobGraphDeps
 from app.graphs.lg2_job_intelligence.drafts import ClarifyingQuestion, ExtractedCriteria, JobProfileDraft, RubricDraft
 from app.graphs.lg2_job_intelligence.posting import build_posting_text
 from app.llm.structured import generate_structured
+from app.prompts.system import SYSTEM_PROMPTS
 from app.rag.ingest import ingest_directory
 from app.schemas.contracts import ApprovalGate, EvaluationRubric, JobProfile, Requirement, RubricDimension
 from app.services import approvals, jobs
@@ -67,7 +68,9 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
             if await jobs.get_job(session, job_id) is None:
                 raise PermanentError("Job not found.")
             version = state.get("draft_version") or await jobs.next_version(session, job_id)
-        return {"draft_version": version, "retry_count": 0, "validation_errors": [], "status": "drafting"}
+        return {"draft_version": version, "retry_count": 0, "validation_errors": [], "status": "drafting",
+                "prompt_versions": {key: SYSTEM_PROMPTS[key].version for key in (
+                    "job.criteria", "job.clarification", "job.profile", "job.edit_plan", "job.rubric")}}
 
     # Turn the conversation into structured criteria and decide, by fixed rules, whether they are sufficient.
     # `force_proceed` (set after too many questions) accepts a title and one requirement.
@@ -125,9 +128,31 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
     @guarded_node("generate_profile")
     async def generate_profile(state: dict[str, Any]) -> dict[str, Any]:
         user = prompts.profile_prompt(state["criteria"], state.get("policy_passages", []), state.get("feedback"),
-                                      state.get("validation_errors", []), deps.settings.company_name)
+                                      state.get("validation_errors", []), deps.settings.company_name,
+                                      state.get("base_profile"), state.get("edit_plan"))
         draft = await generate_structured(deps.llm, JobProfileDraft, system=prompts.PROFILE_SYSTEM, user=user)
-        return {"job_profile": draft.model_dump(mode="json")}
+        profile = draft.model_dump(mode="json")
+        base, plan = state.get("base_profile"), state.get("edit_plan")
+        if base and plan:
+            # Apply only requested prose fields; the requirement patch is merged deterministically below.
+            fields = set(plan.get("changed_fields", []))
+            if plan.get("full_rewrite"):
+                fields.update({"title", "summary", "responsibilities", "employment_type", "location", "about_company", "benefits"})
+            for field in ("title", "summary", "responsibilities", "employment_type", "location", "about_company", "benefits"):
+                if field not in fields:
+                    profile[field] = base.get(field)
+            removals = {text.strip().casefold() for text in plan.get("requirements_to_remove", []) if text.strip()}
+            requirements = [{key: value for key, value in item.items() if key != "requirement_id"}
+                            for item in base.get("requirements", [])
+                            if item.get("text", "").strip().casefold() not in removals]
+            seen = {item.get("text", "").strip().casefold() for item in requirements}
+            for item in plan.get("requirements_to_add", []):
+                normalized = item.get("text", "").strip().casefold()
+                if normalized and normalized not in seen:
+                    requirements.append(item)
+                    seen.add(normalized)
+            profile["requirements"] = requirements
+        return {"job_profile": profile}
 
     # Draft the rubric and normalise its weights to sum to 1.
     @guarded_node("generate_rubric")
@@ -200,7 +225,9 @@ def make_nodes(deps: JobGraphDeps) -> dict[str, Callable]:
         option = answer.get("option") if isinstance(answer, dict) else None
         if option not in _OPTIONS:
             raise PermanentError("Invalid activation decision.")
-        return {"approval_id": str(approval.id), "decision": option, "feedback": answer.get("reason")}
+        return {"approval_id": str(approval.id), "decision": option, "feedback": answer.get("reason"),
+                "edit_plan": answer.get("edit_plan") if isinstance(answer, dict) else None,
+                "base_profile": state.get("job_profile") if option == "edit" else None}
 
     # Approved: make this version the active, immutable one.
     @guarded_node("activate_version")

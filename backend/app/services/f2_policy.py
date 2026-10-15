@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import F2ScoringPolicy, Job, JobVersion
-from app.graphs.f2_scoring.graph import DIMENSIONS
+from app.graphs.f2_scoring.f2_scoring_graph import DIMENSIONS
 
 DEFAULT_WEIGHTS = {"technical_projects": 40, "relevant_experience": 30,
                    "certifications_soft_skills": 10, "education_qualifications": 20}

@@ -10,6 +10,7 @@ from app.graphs.common.base_state import RunMeta
 # State of one job-drafting run (thread_id = job draft).
 class JobIntelState(RunMeta, total=False):
     job_id: str
+    prompt_versions: dict[str, str]
     draft_version: int
     recruiter_prompt: str
     criteria: dict[str, Any]
@@ -24,6 +25,8 @@ class JobIntelState(RunMeta, total=False):
     validation_errors: list[str]
     retry_count: int
     feedback: str | None
+    base_profile: dict[str, Any] | None
+    edit_plan: dict[str, Any] | None
     approval_id: str | None
     decision: Literal["approve", "edit", "reject"] | None
     posting_text: str | None

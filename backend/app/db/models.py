@@ -143,6 +143,8 @@ class CandidateProfile(Base, IdMixin, TimestampMixin):
     integrity_verdict: Mapped[str] = mapped_column(String(30))
     integrity_signals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
     integrity_policy_version: Mapped[str] = mapped_column(String(40))
+    profile_prompt_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    profile_prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 # F1 evidence-based requirement match and per-job ranking result.
@@ -158,6 +160,8 @@ class CandidateScreening(Base, IdMixin, TimestampMixin):
     requirements: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     explanation: Mapped[str] = mapped_column(Text)
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prompt_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class F2ScoringPolicy(Base, IdMixin, TimestampMixin):
@@ -185,6 +189,8 @@ class CandidateScore(Base, IdMixin, TimestampMixin):
     model_name: Mapped[str] = mapped_column(String(120))
     scoring_version: Mapped[str] = mapped_column(String(30))
     input_hash: Mapped[str] = mapped_column(String(64))
+    prompt_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class InterviewSession(Base, IdMixin, TimestampMixin):

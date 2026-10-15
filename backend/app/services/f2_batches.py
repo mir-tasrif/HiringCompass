@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Application, CvBatch, CvBatchItem, Job
-from app.services.cv_tasks import _event
+from app.services.cv_stage_events import record_stage_event as _event
 from app.services.f2_policy import choose_policy, validate_weights
 
 

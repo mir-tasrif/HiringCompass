@@ -15,6 +15,18 @@ from app.services import google_calendar_mcp
 from app.services.chat import _chat_interview_time
 
 
+def test_calendar_connection_routes_keep_their_public_paths():
+    """OAuth redirect and settings controls must survive router reorganization."""
+    from app.main import app
+
+    routes = {(route.path, method) for route in app.routes
+              for method in getattr(route, "methods", set())}
+    assert ("/interviews/google-calendar/status", "GET") in routes
+    assert ("/interviews/google-calendar/connect", "POST") in routes
+    assert ("/interviews/google-calendar/connect", "DELETE") in routes
+    assert ("/interviews/google-calendar/callback", "GET") in routes
+
+
 def _settings() -> Settings:
     return Settings(_env_file=None, jwt_secret="test-only-secret-that-is-long-enough")
 

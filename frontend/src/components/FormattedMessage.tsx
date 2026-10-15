@@ -11,7 +11,7 @@ function inlineText(text: string, keyPrefix: string) {
 
 // Render common assistant Markdown safely as React elements instead of showing its markers literally.
 export default function FormattedMessage({ text }: { text: string }) {
-  const blocks: Array<{ kind: "paragraph" | "list" | "ordered" | "heading"; lines: string[] }> = [];
+  const blocks: Array<{ kind: "paragraph" | "list" | "ordered" | "heading" | "quote"; lines: string[] }> = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -19,6 +19,7 @@ export default function FormattedMessage({ text }: { text: string }) {
     const bullet = /^[-*]\s+(.+)$/.exec(line);
     const numbered = /^\d+[.)]\s+(.+)$/.exec(line);
     const heading = /^#{1,3}\s+(.+)$/.exec(line);
+    const quote = /^>\s?(.+)$/.exec(line);
     if (bullet) {
       const previous = blocks[blocks.length - 1];
       if (previous?.kind === "list") previous.lines.push(bullet[1]);
@@ -29,6 +30,8 @@ export default function FormattedMessage({ text }: { text: string }) {
       else blocks.push({ kind: "ordered", lines: [numbered[1]] });
     } else if (heading) {
       blocks.push({ kind: "heading", lines: [heading[1].replace(/\*\*/g, "")] });
+    } else if (quote) {
+      blocks.push({ kind: "quote", lines: [quote[1]] });
     } else {
       blocks.push({ kind: "paragraph", lines: [line] });
     }
@@ -40,6 +43,7 @@ export default function FormattedMessage({ text }: { text: string }) {
       return <List key={index}>{block.lines.map((line, itemIndex) => <li key={itemIndex}>{inlineText(line, `${index}-${itemIndex}`)}</li>)}</List>;
     }
     if (block.kind === "heading") return <h3 key={index}>{inlineText(block.lines[0], `${index}`)}</h3>;
+    if (block.kind === "quote") return <blockquote key={index}>{inlineText(block.lines[0], `${index}`)}</blockquote>;
     return <p key={index}>{inlineText(block.lines[0], `${index}`)}</p>;
   })}</div>;
 }

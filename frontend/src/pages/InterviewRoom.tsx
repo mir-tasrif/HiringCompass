@@ -1,3 +1,4 @@
+// Interviewer room page: candidate context, call controls, transcript, and private assistant.
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import InterviewCall, { InterviewCallHandle } from "../components/InterviewCall";

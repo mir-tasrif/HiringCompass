@@ -6,7 +6,9 @@ import unittest
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from app.graphs.f2_scoring.graph import DIMENSIONS, build_scoring_graph, verified_cv_evidence
+from app.graphs.f2_scoring.f2_scoring_graph import DIMENSIONS, build_scoring_graph, register_scoring_graph, verified_cv_evidence
+from app.graphs.orchestrator import GraphRegistry
+from app.schemas.contracts import WorkKind
 
 
 class FakeLLM:
@@ -29,6 +31,14 @@ class UnverifiedEvidenceLLM:
 
 
 class TestF2Graph(unittest.TestCase):
+    def test_scoring_graph_is_available_through_shared_registry(self):
+        registry = GraphRegistry()
+        register_scoring_graph(registry, FakeLLM())
+        checkpointer = MemorySaver()
+        self.assertIn(WorkKind.SCORING, registry.kinds())
+        self.assertIs(registry.get(WorkKind.SCORING, checkpointer),
+                      registry.get(WorkKind.SCORING, checkpointer))
+
     def test_ocr_spacing_and_punctuation_do_not_reject_real_evidence(self):
         self.assertIsNotNone(verified_cv_evidence("Built Python-based APIs\nfor customer projects.",
                                                   "Built Python based APIs for customer projects"))
@@ -55,6 +65,7 @@ class TestF2Graph(unittest.TestCase):
                 {"configurable": {"thread_id": "test-f2"}}), timeout=10)
         result = asyncio.run(run())
         self.assertEqual(result["aggregate_score"], 75.0)
+        self.assertEqual((result["prompt_key"], result["prompt_version"]), ("f2.scoring", "1"))
         self.assertTrue(result["dimensions"][2]["missing"])
 
 

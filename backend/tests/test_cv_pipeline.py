@@ -7,7 +7,8 @@ from pathlib import Path
 import pymupdf
 
 from app.core.config import Settings
-from app.services.cv_pipeline import extract_pdf_text, inspect_integrity, integrity_requires_review, parse_candidate_profile
+from app.services.cv_pipeline import extract_pdf_text, parse_candidate_profile
+from app.services.f11_integrity import inspect_integrity, integrity_requires_review
 
 
 def _pdf(path: Path, *, injection: str = "", white_text: str = "") -> Path:

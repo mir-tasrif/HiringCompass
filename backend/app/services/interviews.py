@@ -13,6 +13,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
+import jwt
 from livekit import api as livekit_api
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -109,7 +110,14 @@ def rtc_token(settings: Settings, session_id: str, role: str, name: str) -> str:
             .with_identity(identity).with_name(name)
             .with_grants(livekit_api.VideoGrants(room_join=True, room=f"interview-{session_id}",
                                                  can_publish=True, can_subscribe=True))
-            .with_ttl(timedelta(minutes=15)).to_jwt())
+            .with_ttl(timedelta(minutes=30)).to_jwt())
+
+
+def stt_token(settings: Settings, session_id: str, role: str) -> str:
+    """Scope an ephemeral streaming connection to one interview and one speaker."""
+    return jwt.encode({"purpose": "interview_stt", "sid": session_id, "role": role,
+                       "exp": datetime.now(timezone.utc) + timedelta(hours=3)},
+                      settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
 async def close_room(settings: Settings, session_id: str) -> None:

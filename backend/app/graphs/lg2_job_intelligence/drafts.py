@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.schemas.contracts import RequirementKind, RubricDimension
@@ -9,7 +11,7 @@ from app.schemas.contracts import RequirementKind, RubricDimension
 
 # One requirement as proposed by the model.
 class RequirementDraft(BaseModel):
-    text: str = Field(min_length=3)
+    text: str = Field(min_length=1)
     kind: RequirementKind
     weight: float = Field(default=1.0, gt=0, le=10)
     min_years: float | None = Field(default=None, ge=0)
@@ -36,6 +38,15 @@ class ClarifyingQuestion(BaseModel):
     field: str = Field(min_length=2)
     question: str = Field(min_length=5)
     options: list[str] = Field(default_factory=list, max_length=5)
+
+
+# A narrow patch extracted from feedback on a pending draft. The original profile is merged in code.
+class JobEditPlan(BaseModel):
+    requirements_to_add: list[RequirementDraft] = Field(default_factory=list)
+    requirements_to_remove: list[str] = Field(default_factory=list)
+    changed_fields: list[Literal["title", "summary", "responsibilities", "employment_type", "location", "about_company", "benefits"]] = Field(default_factory=list)
+    full_rewrite: bool = False
+    clarification_question: str | None = None
 
 
 # Draft job profile before validation and id assignment.

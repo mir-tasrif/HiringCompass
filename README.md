@@ -2,9 +2,15 @@
 
 HiringCompass is an AI-assisted recruitment platform that helps hiring teams review candidate evidence and make informed decisions. Human reviewers remain responsible for hiring decisions.
 
+## Run command:
+
+.\scripts\start-interview-demo.ps1
+
+With `LIVEKIT_URL` set to a LiveKit Cloud `wss://` address and its API credentials in `.env`, this command verifies the media service, refreshes the public invitation address, and starts the local app. See [interview setup](docs/interviews-local-setup.md). For the older same-Wi-Fi LiveKit mode, pass `-LanIp` with the current Wi-Fi IPv4 address.
+
 ## Project status
 
-Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. CV intake, F11 integrity review, parsing, F1 ranking, F2 scoring, and recruiter review are available. The interview and Groq Whisper transcription flow is implemented for local-network testing; assessment remains under development.
+Job intelligence is implemented: normal conversation, guided job drafting, company RAG, draft review, and continued conversation after approval. CV intake, F11 integrity review, parsing, F1 ranking, F2 scoring, and recruiter review are available. Interviews use LiveKit Cloud for remote video; AssemblyAI streaming or Groq Whisper can provide transcription. Assessment remains under development.
 
 ## Company knowledge for job descriptions
 
@@ -32,20 +38,20 @@ The worker runs as part of `docker compose up --build`. Progress and independent
 
 ## Local video interviews
 
-F2-approved candidates appear in **Candidates → Selected for Interview**. Recruiters can schedule or reschedule a private interview, correct its invitation email, review generated questions, admit the candidate, and conduct a LiveKit video call. Each participant's microphone sends short, separate audio segments to Groq Whisper; only role-labeled transcript turns are saved. The recruiter can review saved turns and ask the private interview assistant for questions grounded in the job, CV, company knowledge, and conversation so far.
+F2-approved candidates appear in **Candidates → Selected for Interview**. Recruiters can schedule or reschedule a private interview, correct its invitation email, review generated questions, admit the candidate, and conduct a LiveKit video call. AssemblyAI receives each participant's separate microphone stream through the app when `STT_PROVIDER=assemblyai`; Groq Whisper remains available for short-segment transcription. Only role-labeled transcript turns are saved by the app. The recruiter can review saved turns and ask the private interview assistant for questions grounded in the job, CV, company knowledge, and conversation so far.
 
 For a same-Wi-Fi demonstration without certificate installation, start the temporary HTTPS interview tunnel described in [interviews-local-setup.md](docs/interviews-local-setup.md). The guide also covers the LAN-only certificate option.
 
 ## Solution overview
 
-The system uses six LangGraph workflows:
+The architecture plans six LangGraph workflows. Five graph components currently run: a read-only LG1 chat intent graph, LG2 job intelligence, LG3/F11 integrity, LG3/F1 requirement screening, and LG4/F2 scoring. The remaining stages use durable service and worker code or are still planned. See the [feature-to-code map](docs/feature-code-map.md) to trace each implemented workflow from screen to database:
 
-1. **Central chatbot** — routes user intent, invokes tools, and requests confirmation when needed.
+1. **Central chatbot** — chat intent classification is a checkpointed graph; tool actions and confirmations still run in services.
 2. **Job intelligence** — drafts job profiles and scoring rubrics, then waits for approval before activation.
-3. **Application screening** — extracts CV information, runs integrity checks and F1 screening, and pauses for human review.
+3. **Application screening** — F11 integrity checks and F1 requirement assessment run in checkpointed LG3 graphs. CV extraction and recruiter review remain in services and the worker.
 4. **Scoring** — calculates F2 scores and supports interview selection.
-5. **Interview intelligence** — analyzes interview transcripts against job requirements.
-6. **Consolidated assessment** — combines screening, scoring, and interview evidence for human review.
+5. **Interview intelligence** — the latest completed transcript can be handed off to F5; the analysis graph is planned.
+6. **Consolidated assessment** — combining screening, scoring, and interview evidence remains planned.
 
 Each candidate workflow is isolated by job and candidate identifiers. CV batches, per-CV status, extracted profiles, integrity findings, screening evidence, and review events persist in PostgreSQL so processing can continue after navigation or service restarts.
 
@@ -55,7 +61,7 @@ Each candidate workflow is isolated by job and candidate identifiers. CV batches
 - LangGraph for workflow orchestration
 - PostgreSQL for application data and workflow checkpoints
 - pgvector for retrieval where needed
-- LiveKit WebRTC and Groq Whisper for interview delivery and transcription
+- LiveKit WebRTC with AssemblyAI streaming or Groq Whisper for transcription
 - Docker Compose for local development
 
 
@@ -78,313 +84,19 @@ Candidate documents and interview data are sensitive. Restrict access, avoid log
 
 
 ## Repository structure
-```
-HiringCompass
-├─ .dockerignore
-├─ backend
-│  ├─ alembic.ini
-│  ├─ app
-│  │  ├─ api
-│  │  │  ├─ errors.py
-│  │  │  ├─ routers
-│  │  │  └─ __init__.py
-│  │  ├─ approvals
-│  │  ├─ core
-│  │  │  ├─ config.py
-│  │  │  ├─ errors.py
-│  │  │  ├─ logging.py
-│  │  │  ├─ middleware.py
-│  │  │  └─ security.py
-│  │  ├─ db
-│  │  │  ├─ base.py
-│  │  │  ├─ models
-│  │  │  ├─ models.py
-│  │  │  ├─ repositories
-│  │  │  ├─ session.py
-│  │  │  └─ __init__.py
-│  │  ├─ graphs
-│  │  │  ├─ common
-│  │  │  │  ├─ base_state.py
-│  │  │  │  ├─ checkpointer.py
-│  │  │  │  ├─ handoff.py
-│  │  │  │  ├─ node_guard.py
-│  │  │  │  └─ __init__.py
-│  │  │  ├─ lg1_chatbot
-│  │  │  │  ├─ graph.py
-│  │  │  │  ├─ nodes.py
-│  │  │  │  ├─ routing.py
-│  │  │  │  └─ state.py
-│  │  │  ├─ lg2_job_intelligence
-│  │  │  ├─ lg3_screening
-│  │  │  │  └─ f11_subgraph.py
-│  │  │  ├─ lg4_scoring
-│  │  │  ├─ lg5_interview_analysis
-│  │  │  ├─ lg6_assessment
-│  │  │  ├─ orchestrator.py
-│  │  │  └─ __init__.py
-│  │  ├─ llm
-│  │  │  ├─ client.py
-│  │  │  ├─ embeddings.py
-│  │  │  ├─ structured.py
-│  │  │  └─ __init__.py
-│  │  ├─ main.py
-│  │  ├─ rag
-│  │  │  ├─ chunking.py
-│  │  │  ├─ corpora
-│  │  │  │  ├─ company
-│  │  │  │  │  └─ hiring_policy_sample.md
-│  │  │  │  └─ technical
-│  │  │  ├─ ingest.py
-│  │  │  ├─ store.py
-│  │  │  └─ __init__.py
-│  │  ├─ realtime
-│  │  │  └─ ws_audio.py
-│  │  ├─ schemas
-│  │  │  ├─ approvals.py
-│  │  │  ├─ contracts.py
-│  │  │  ├─ domain.py
-│  │  │  ├─ enums.py
-│  │  │  └─ __init__.py
-│  │  ├─ services
-│  │  │  ├─ uploads.py
-│  │  │  └─ __init__.py
-│  │  ├─ tools
-│  │  └─ worker
-│  ├─ Dockerfile
-│  ├─ migrations
-│  │  ├─ env.py
-│  │  ├─ script.py.mako
-│  │  └─ versions
-│  │     ├─ 0001_base_schema.py
-│  │     └─ 0002_knowledge_base.py
-│  ├─ pyproject.toml
-│  ├─ requirements.txt
-│  └─ tests
-│     ├─ test_checkpoint_resume.py
-│     ├─ test_graph_skeleton.py
-│     ├─ test_llm_rag.py
-│     ├─ test_uploads.py
-│     └─ __init__.py
-├─ docker
-│  └─ db
-│     └─ init.sql
-├─ docker-compose.yml
-├─ docs
-│  ├─ diagrams
-│  │  ├─ HiringCompass_High_Level_Workflow.drawio.pdf
-│  │  ├─ HiringCompass_LG1_central_chatbot.drawio.pdf
-│  │  ├─ HiringCompass_LG2_job_intelligence.drawio.pdf
-│  │  ├─ HiringCompass_LG3_application_screening.drawio.pdf
-│  │  ├─ HiringCompass_LG4_scoring.drawio.pdf
-│  │  ├─ HiringCompass_LG5_interview_analysis_f5.drawio.pdf
-│  │  ├─ HiringCompass_LG6_assessment_f6.drawio.pdf
-│  │  └─ HiringCompass_Modular_Architecture_Final.drawio.pdf
-│  ├─ Project Clarification.xlsx
-│  ├─ Risk Register.pdf
-│  └─ WBS-HiringCompass_Mir_Tasrif_Ahmed_30217.xlsx
-├─ errors
-├─ frontend
-│  ├─ .dockerignore
-│  ├─ Dockerfile
-│  ├─ index.html
-│  ├─ nginx.conf
-│  ├─ package.json
-│  ├─ src
-│  │  ├─ api
-│  │  │  └─ client.ts
-│  │  ├─ App.tsx
-│  │  ├─ components
-│  │  │  └─ ChatDock
-│  │  ├─ hooks
-│  │  │  └─ useHealth.ts
-│  │  ├─ main.tsx
-│  │  ├─ pages
-│  │  └─ styles.css
-│  ├─ tsconfig.json
-│  └─ vite.config.ts
-├─ hiringcompass_state_schemas.py
-├─ logs
-├─ README.md
-├─ scripts
-├─ setup_project.py
-└─ tests
-   ├─ fixtures
-   │  └─ synthetic_cvs
-   ├─ integration
-   ├─ mock_runners
-   └─ unit
 
-```
-```
-HiringCompass
-├─ .dockerignore
-├─ backend
-│  ├─ alembic.ini
-│  ├─ app
-│  │  ├─ api
-│  │  │  ├─ deps.py
-│  │  │  ├─ errors.py
-│  │  │  ├─ routers
-│  │  │  │  ├─ auth.py
-│  │  │  │  ├─ chat.py
-│  │  │  │  └─ __init__.py
-│  │  │  └─ __init__.py
-│  │  ├─ approvals
-│  │  ├─ core
-│  │  │  ├─ config.py
-│  │  │  ├─ errors.py
-│  │  │  ├─ logging.py
-│  │  │  ├─ middleware.py
-│  │  │  └─ security.py
-│  │  ├─ db
-│  │  │  ├─ base.py
-│  │  │  ├─ models
-│  │  │  ├─ models.py
-│  │  │  ├─ repositories
-│  │  │  ├─ session.py
-│  │  │  └─ __init__.py
-│  │  ├─ graphs
-│  │  │  ├─ common
-│  │  │  │  ├─ base_state.py
-│  │  │  │  ├─ checkpointer.py
-│  │  │  │  ├─ handoff.py
-│  │  │  │  ├─ node_guard.py
-│  │  │  │  └─ __init__.py
-│  │  │  ├─ lg1_chatbot
-│  │  │  │  ├─ graph.py
-│  │  │  │  ├─ nodes.py
-│  │  │  │  ├─ routing.py
-│  │  │  │  └─ state.py
-│  │  │  ├─ lg2_job_intelligence
-│  │  │  │  ├─ deps.py
-│  │  │  │  ├─ drafts.py
-│  │  │  │  ├─ graph.py
-│  │  │  │  ├─ nodes.py
-│  │  │  │  ├─ posting.py
-│  │  │  │  ├─ prompts.py
-│  │  │  │  ├─ routing.py
-│  │  │  │  ├─ state.py
-│  │  │  │  └─ __init__.py
-│  │  │  ├─ lg3_screening
-│  │  │  │  └─ f11_subgraph.py
-│  │  │  ├─ lg4_scoring
-│  │  │  ├─ lg5_interview_analysis
-│  │  │  ├─ lg6_assessment
-│  │  │  ├─ orchestrator.py
-│  │  │  └─ __init__.py
-│  │  ├─ llm
-│  │  │  ├─ client.py
-│  │  │  ├─ embeddings.py
-│  │  │  ├─ structured.py
-│  │  │  └─ __init__.py
-│  │  ├─ main.py
-│  │  ├─ rag
-│  │  │  ├─ chunking.py
-│  │  │  ├─ corpora
-│  │  │  │  ├─ company
-│  │  │  │  │  └─ hiring_policy_sample.md
-│  │  │  │  └─ technical
-│  │  │  ├─ ingest.py
-│  │  │  ├─ store.py
-│  │  │  └─ __init__.py
-│  │  ├─ realtime
-│  │  │  └─ ws_audio.py
-│  │  ├─ schemas
-│  │  │  ├─ approvals.py
-│  │  │  ├─ contracts.py
-│  │  │  ├─ domain.py
-│  │  │  ├─ enums.py
-│  │  │  └─ __init__.py
-│  │  ├─ services
-│  │  │  ├─ approvals.py
-│  │  │  ├─ chat.py
-│  │  │  ├─ dispatch.py
-│  │  │  ├─ fairness.py
-│  │  │  ├─ jobs.py
-│  │  │  ├─ uploads.py
-│  │  │  ├─ users.py
-│  │  │  └─ __init__.py
-│  │  ├─ tools
-│  │  └─ worker
-│  ├─ Dockerfile
-│  ├─ migrations
-│  │  ├─ env.py
-│  │  ├─ script.py.mako
-│  │  └─ versions
-│  │     ├─ 0001_base_schema.py
-│  │     ├─ 0002_knowledge_base.py
-│  │     └─ 0003_chat.py
-│  ├─ pyproject.toml
-│  ├─ requirements.txt
-│  └─ tests
-│     ├─ helpers.py
-│     ├─ test_auth.py
-│     ├─ test_chat.py
-│     ├─ test_checkpoint_resume.py
-│     ├─ test_graph_skeleton.py
-│     ├─ test_lg2_job_intelligence.py
-│     ├─ test_llm_rag.py
-│     ├─ test_uploads.py
-│     └─ __init__.py
-├─ docker
-│  └─ db
-│     └─ init.sql
-├─ docker-compose.yml
-├─ docs
-│  ├─ diagrams
-│  │  ├─ HiringCompass_High_Level_Workflow.drawio.pdf
-│  │  ├─ HiringCompass_LG1_central_chatbot.drawio.pdf
-│  │  ├─ HiringCompass_LG2_job_intelligence.drawio.pdf
-│  │  ├─ HiringCompass_LG3_application_screening.drawio.pdf
-│  │  ├─ HiringCompass_LG4_scoring.drawio.pdf
-│  │  ├─ HiringCompass_LG5_interview_analysis_f5.drawio.pdf
-│  │  ├─ HiringCompass_LG6_assessment_f6.drawio.pdf
-│  │  └─ HiringCompass_Modular_Architecture_Final.drawio.pdf
-│  ├─ Project Clarification.xlsx
-│  ├─ Risk Register.pdf
-│  └─ WBS-HiringCompass_Mir_Tasrif_Ahmed_30217.xlsx
-├─ errors
-├─ frontend
-│  ├─ .dockerignore
-│  ├─ Dockerfile
-│  ├─ index.html
-│  ├─ nginx.conf
-│  ├─ package.json
-│  ├─ src
-│  │  ├─ api
-│  │  │  ├─ chat.ts
-│  │  │  └─ client.ts
-│  │  ├─ App.tsx
-│  │  ├─ auth
-│  │  │  └─ AuthContext.tsx
-│  │  ├─ components
-│  │  │  ├─ ChatDock
-│  │  │  ├─ Layout.tsx
-│  │  │  └─ RequireAuth.tsx
-│  │  ├─ hooks
-│  │  │  └─ useHealth.ts
-│  │  ├─ main.tsx
-│  │  ├─ pages
-│  │  │  ├─ Assistant.tsx
-│  │  │  ├─ ComingSoon.tsx
-│  │  │  ├─ Dashboard.tsx
-│  │  │  └─ Login.tsx
-│  │  └─ styles.css
-│  ├─ tsconfig.json
-│  └─ vite.config.ts
-├─ hiringcompass_state_schemas.py
-├─ logs
-├─ package-lock.json
-├─ package.json
-├─ Project_tree.md
-├─ README.md
-├─ scripts
-├─ setup_project.py
-└─ tests
-   ├─ fixtures
-   │  └─ synthetic_cvs
-   ├─ integration
-   ├─ mock_runners
-   └─ unit
+The maintained [feature-to-code map](docs/feature-code-map.md) links each screen to its API, service or graph, data, and external provider. The [presentation walkthrough](docs/presentation-walkthrough.md) follows the main workflows end to end.
 
-```
+| Area | Location |
+| --- | --- |
+| Web pages and reusable UI | `frontend/src/pages/`, `frontend/src/components/` |
+| Web API clients | `frontend/src/api/` |
+| HTTP routers and contracts | `backend/app/api/routers/`, `backend/app/api/schemas/` |
+| Business operations | `backend/app/services/` |
+| Implemented LangGraphs | `backend/app/graphs/chat_intent/`, `backend/app/graphs/lg2_job_intelligence/`, `backend/app/graphs/lg3_screening/`, `backend/app/graphs/f2_scoring/` |
+| System prompts and user-message builders | `backend/app/prompts/` |
+| Database models and migrations | `backend/app/db/models.py`, `backend/migrations/versions/` |
+| CV worker and backend tests | `backend/app/worker/`, `backend/tests/` |
+| Startup and interview setup | `docker-compose.yml`, `scripts/` |
+
+LG5 interview analysis and LG6 consolidated assessment are planned. The current F5 implementation hands off the latest completed transcript for later analysis.

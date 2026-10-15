@@ -1,22 +1,24 @@
+// Route table: load feature pages separately so their code is easy to locate and shipped on demand.
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import RequireAuth from "./components/RequireAuth";
-import ComingSoon from "./pages/ComingSoon";
-import Dashboard from "./pages/Dashboard";
-import Login from "./pages/Login";
-import Assistant from "./pages/Assistant";
-import Jobs from "./pages/Jobs";
-import JobDetailPage from "./pages/JobDetail";
-import JobSubmissions from "./pages/JobSubmissions";
-import Candidates from "./pages/Candidates";
-import Interviews from "./pages/Interviews";
-import InterviewRoom from "./pages/InterviewRoom";
-import InterviewGuest from "./pages/InterviewGuest";
+const ComingSoon = lazy(() => import("./pages/ComingSoon"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Login = lazy(() => import("./pages/Login"));
+const Assistant = lazy(() => import("./pages/Assistant"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const JobDetailPage = lazy(() => import("./pages/JobDetail"));
+const JobSubmissions = lazy(() => import("./pages/JobSubmissions"));
+const Candidates = lazy(() => import("./pages/Candidates"));
+const Interviews = lazy(() => import("./pages/Interviews"));
+const InterviewRoom = lazy(() => import("./pages/InterviewRoom"));
+const InterviewGuest = lazy(() => import("./pages/InterviewGuest"));
 
 // Route table: public login, and every other page inside the authenticated layout.
 export default function App() {
   return (
-    <Routes>
+    <Suspense fallback={<p role="status">Loading page…</p>}><Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/interview/:invitation" element={<InterviewGuest />} />
       <Route
@@ -38,6 +40,6 @@ export default function App() {
         <Route path="assistant" element={<Assistant />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
-    </Routes>
+    </Routes></Suspense>
   );
 }

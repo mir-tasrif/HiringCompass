@@ -1,26 +1,26 @@
-# Interview setup on one Wi-Fi network
+# Interview setup for candidates on any network
 
 ## Candidate joins without installing a certificate
 
-For a local demonstration, use a temporary, publicly trusted HTTPS tunnel. The browser page and LiveKit signaling share that one link; the video media still uses the recruiter computer's Wi-Fi address. The candidate needs an internet connection as well as access to the same Wi-Fi network.
+For candidates on different networks, the Cloudflare tunnel serves the browser page while LiveKit Cloud carries video and audio. The candidate needs only a current browser, internet access, and camera/microphone permission. The recruiter computer and Docker stack must remain running during the call.
 
-1. Confirm `.env` has the SMTP credentials, `GROQ_API_KEY`, and LiveKit API key and secret. From PowerShell in the project directory, run:
+1. Confirm `.env` has the SMTP credentials, `LIVEKIT_URL=wss://<your-project>.livekit.cloud`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`. For live AssemblyAI transcription, set `STT_PROVIDER=assemblyai` and `ASSEMBLYAI_API_KEY`; to keep Groq Whisper, set `STT_PROVIDER=groq` and `GROQ_API_KEY`. From PowerShell in the project directory, run:
 
    ```powershell
-   .\scripts\start-interview-demo.ps1 -LanIp 192.168.150.45
+   .\scripts\start-interview-demo.ps1 
    ```
 
-   Replace the IP if the recruiter computer's Wi-Fi address changes. The command starts the required Docker services, obtains a temporary `https://...trycloudflare.com` address, and updates `WEB_BASE_URL` and `LIVEKIT_PUBLIC_URL` in `.env`. It does not print credentials.
+   This command verifies the LiveKit Cloud credentials, starts the required Docker services, creates a temporary `https://...trycloudflare.com` address, updates `WEB_BASE_URL` and `LIVEKIT_PUBLIC_URL` in `.env`, and starts the API after the tunnel is reachable. The API emails replacement links to sent invitations for unstarted interviews when their recorded hostname differs. It does not print credentials.
 
 2. Open the **recruiter address printed by the command**. Schedule a new interview or resend an existing invitation. The candidate opens the newest emailed link directly in a current browser. Neither device installs a certificate.
 
-3. Keep the tunnel running until the interview ends. If the tunnel container restarts, its address changes: run the command again and resend outstanding invitations. For video media, allow TCP 7881 and UDP 7882 through the recruiter computer's firewall and disable Wi-Fi client isolation. TCP 8443 and 8444 are not used in this tunnel mode.
+3. Keep the tunnel running until the interview ends. If you stop or restart the system, run the same command again; the script creates a fresh hostname and the app automatically emails updated links for pending, unstarted interviews. No inbound video ports or shared Wi-Fi are needed with LiveKit Cloud.
 
-This temporary address exposes the app's web login and token-protected candidate invitation to the internet while the tunnel runs. It is intended only for testing and has no uptime guarantee. Stop it with `docker compose --profile interview-tunnel stop interview-tunnel` when finished. For a durable deployment, use a stable domain and hosted signaling.
+This temporary address exposes the app's web login and token-protected candidate invitation to the internet while the tunnel runs. It is intended only for testing and has no uptime guarantee. Stop it with `docker compose --profile interview-tunnel stop interview-tunnel` when finished. For a durable invitation address, use a stable app domain.
 
 ## Alternative: LAN-only HTTPS with a trusted local certificate
 
-The recruiter and candidate must be on the same Wi-Fi network. The recruiter computer runs Docker and exposes an HTTPS web address plus a secure LiveKit WebSocket address. Browsers require a trusted HTTPS origin to grant camera and microphone access on a LAN IP address.
+For the older local LiveKit mode, the recruiter and candidate must be on the same Wi-Fi network. Set `LIVEKIT_URL=ws://livekit:7880` and use `-LanIp` with the startup script, or follow the LAN certificate setup below. Browsers require a trusted HTTPS origin to grant camera and microphone access on a LAN IP address.
 
 1. Find the recruiter computer's Wi-Fi IPv4 address with `ipconfig`. Use that address in `.env`:
 
@@ -57,6 +57,6 @@ The recruiter and candidate must be on the same Wi-Fi network. The recruiter com
 
 5. In **Candidates → Selected for Interview**, choose **Schedule interview**. Confirm or correct the candidate email. The invitation link rotates on reschedule or resend. The candidate acknowledges transcription and waits; the recruiter admits them and starts the session.
 
-Each browser sends short audio segments from its own microphone to Groq Whisper. The backend stores only speaker-labeled transcript turns; it does not keep raw audio or video files. If transcription fails, the call continues and the browser retries queued segments while the page remains open. The recruiter alone can view the live and saved transcript.
+With AssemblyAI selected, each browser sends its own microphone audio through the app's authenticated WebSocket to AssemblyAI's streaming API. Only finalized, speaker-labeled transcript turns are saved; the app does not keep raw audio or video files. If transcription disconnects, the call continues and the browser reconnects, although speech during an outage may be missed. The recruiter alone can view the live and saved transcript. AssemblyAI offers zero audio and transcript retention for Streaming when your AssemblyAI account is opted out of model training; review that setting in the AssemblyAI dashboard if this privacy requirement applies.
 
 The candidate link is valid only for that interview and expires after its scheduled window. The LiveKit room token is issued only after the recruiter starts and the candidate is admitted.

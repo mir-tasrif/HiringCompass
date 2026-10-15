@@ -22,7 +22,7 @@ from app.db.session import SessionLocal, get_session
 from app.services import uploads
 from app.services.chat import ChatRuntime
 from app.services.postings import post_to_discord
-from app.services.cv_tasks import _finalize_batch, refresh_batch_status
+from app.services.cv_tasks import finalize_batch, refresh_batch_status
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 settings = get_settings()
@@ -330,5 +330,5 @@ async def delete_applications(job_id: uuid.UUID, body: DeleteApplicationsBody,
         await refresh_batch_status(session, item.batch_id)
     await session.commit()
     for batch_id in finalize_ids:
-        await _finalize_batch(SessionLocal, batch_id)
+        await finalize_batch(SessionLocal, batch_id)
     return DeleteApplicationsOut(rejected_ids=[application.id for application in rows])

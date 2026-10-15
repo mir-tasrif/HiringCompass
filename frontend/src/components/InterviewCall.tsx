@@ -1,3 +1,4 @@
+// LiveKit room and microphone lifecycle; sends audio to the configured transcription provider.
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { Room, RoomEvent, Track } from "livekit-client";
 import { JoinCredentials, sendAudioSegment } from "../api/interviews";

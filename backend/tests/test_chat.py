@@ -164,7 +164,8 @@ def test_interview_to_draft_regenerate_approve(tmp_path):
             detail = say(client, tid, "0-1 years, B.Sc in Computer Science")
             draft = detail["messages"][-1]
             assert draft["payload"]["type"] == "draft" and "Required:" in draft["payload"]["jd_text"] and detail["state"] == "awaiting_decision"
-            assert "Chorolin IT LTD" in draft["payload"]["jd_text"] and "hr@chorolin.com" in draft["payload"]["jd_text"]
+            assert "Chorolin IT LTD" in draft["payload"]["jd_text"]
+            assert draft["payload"]["google_form_link"] in draft["payload"]["jd_text"]
             assert isinstance(draft["payload"]["sources"], list)
             first = draft["payload"]
             body = {"option": "regenerate", "approval_id": first["approval_id"], "version": first["version"]}
@@ -197,7 +198,11 @@ def test_interview_to_draft_regenerate_approve(tmp_path):
 
 # Typing feedback while a draft is waiting regenerates it using that feedback.
 def test_typed_feedback_regenerates(tmp_path):
-    env = Env(tmp_path, SCRIPT)
+    feedback_plan = json.dumps({"requirements_to_add": [{"text": "Kubernetes", "kind": "preferred"}]})
+    regenerated = {**PROFILE, "summary": "An unrelated rewritten summary.", "requirements": [REQS[0]]}
+    script = {**SCRIPT, "JobEditPlan": [feedback_plan],
+              "JobProfileDraft": [json.dumps({**PROFILE, "title": "Junior ML Engineer"}), json.dumps(regenerated)]}
+    env = Env(tmp_path, script)
     env.add_user()
     try:
         with TestClient(env.app) as client:
@@ -208,6 +213,34 @@ def test_typed_feedback_regenerates(tmp_path):
             detail = say(client, tid, "please add Kubernetes as a preferred skill")
             assert detail["messages"][-1]["payload"]["version"] == 2
             assert "Kubernetes" in env.llm.calls_for("JobProfileDraft")[1][1]["content"]
+            edited_profile = detail["messages"][-1]["payload"]["profile"]
+            assert edited_profile["summary"] == PROFILE["summary"]
+            assert {r["text"] for r in edited_profile["requirements"]} == {r["text"] for r in REQS} | {"Kubernetes"}
+    finally:
+        env.cleanup()
+
+
+def test_vague_requirement_edit_asks_for_items_and_keeps_draft_pending(tmp_path):
+    vague = json.dumps({"clarification_question": "Which preferred skills should I add?"})
+    resolved = json.dumps({"requirements_to_add": [
+        {"text": "Kubernetes", "kind": "preferred"}, {"text": "AWS", "kind": "preferred"}
+    ]})
+    env = Env(tmp_path, {**SCRIPT, "JobEditPlan": [vague, resolved]})
+    env.add_user()
+    try:
+        with TestClient(env.app) as client:
+            tid = client.post("/chat/threads").json()["id"]
+            say(client, tid, "junior ML engineer")
+            say(client, tid, "0-1 years, B.Sc")
+            env.llm.script["TurnIntent"] = [json.dumps({"action": "edit_draft"})]
+            detail = say(client, tid, "add more preferred skills")
+            assert detail["messages"][-1]["payload"]["field"] == "job_edit_requirement_details"
+            assert detail["state"] == "awaiting_decision"
+            assert detail["messages"][-3]["payload"]["type"] == "draft"
+            detail = say(client, tid, "Kubernetes and AWS")
+            assert detail["messages"][-1]["payload"]["type"] == "draft"
+            edited = {r["text"] for r in detail["messages"][-1]["payload"]["profile"]["requirements"]}
+            assert edited >= {r["text"] for r in REQS} | {"Kubernetes", "AWS"}
     finally:
         env.cleanup()
 

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from app.core.config import Settings, get_settings
+from app.prompts.common import JSON_SCHEMA_INSTRUCTION, JSON_SCHEMA_RETRY_INSTRUCTION
 from app.core.errors import PermanentError, TransientError
 from app.core.logging import get_logger
 
@@ -114,7 +115,7 @@ class LLMClient:
             if s.llm_json_mode == "json_schema":
                 payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "schema": schema}}
             else:
-                instruction = "Reply only with one JSON object matching this JSON schema: " + json.dumps(schema)
+                instruction = JSON_SCHEMA_INSTRUCTION + json.dumps(schema)
                 payload["messages"] = [{"role": "system", "content": instruction}, *messages]
                 payload["response_format"] = {"type": "json_object"}
         try:
@@ -128,7 +129,7 @@ class LLMClient:
             ):
                 raise
             fallback = {**payload, "messages": [
-                {"role": "system", "content": "Return only a valid JSON object matching this schema: " + json.dumps(schema)},
+                {"role": "system", "content": JSON_SCHEMA_RETRY_INSTRUCTION + json.dumps(schema)},
                 *messages,
             ]}
             fallback.pop("response_format", None)

@@ -120,7 +120,9 @@ class WorkStatus(str, Enum):
 
 # Kinds of graph runs the worker can execute.
 class WorkKind(str, Enum):
+    CHAT_INTENT = "chat_intent"
     JOB_DRAFT = "job_draft"
+    INTEGRITY_CHECK = "integrity_check"
     APPLICATION_SCREENING = "application_screening"
     SCORING = "scoring"
     INTERVIEW_ANALYSIS = "interview_analysis"

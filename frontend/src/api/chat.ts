@@ -14,6 +14,9 @@ export type MessagePayload =
   | { type: "posting_result"; platform: string; status: "posted" | "already_posted" | "failed"; version?: number; channel?: string }
   | { type: "job_update"; jobs: { job_id: string; job_code: string | null; title: string; version: number; cv_submissions: number; cv_pipeline: { uploaded: number; integrity_check: number; integrity_review: number; parsed: number; ranking: number; f1_review: number; scoring: number; scoring_processing?: number; f2_review?: number; interview_selection?: number; rejected: number }; posting_status: string; posting_configured: boolean; can_post: boolean; archived: boolean; postings: { platform: string; status: string }[] }[] }
   | { type: "candidate_work"; route: string; job_id?: string; job_code?: string | null; kind?: "integrity" | "ranking" | "scoring" | "review"; batch_id?: string; awaiting_confirmation?: string | null; application_ids?: string[]; weights?: Record<string, number>; review_required?: boolean; evidence_summary?: string }
+  | { type: "interview_roster"; job_id: string; route: string; candidates: { application_id: string; label: string; name: string; email: string | null; interview_id: string | null; interview_status: string | null; scheduled_at: string | null; invitation_sent: boolean }[] }
+  | { type: "interview_batch"; state: "need_time" | "preview" | "result"; job_id: string; route?: string; failed_application_ids?: string[]; entries?: { application_id: string; label: string; name: string; email: string; start: string }[] }
+  | { type: "interview_schedule"; awaiting_confirmation?: string; application_id?: string; candidate_name?: string; scheduled_at?: string }
   | { type: "decision"; option: string }
   | { type: "error" };
 
