@@ -187,8 +187,10 @@ const InterviewCall = forwardRef<InterviewCallHandle, Props>(function InterviewC
     void connect();
     const timer = window.setInterval(() => {
       if (credentials.stt_provider === "assemblyai") {
-        if (recordingRequestedRef.current && !assemblyRef.current && !assemblyStartingRef.current)
-          beginTranscription(microphoneRef.current ?? undefined);
+        if (recordingRequestedRef.current && !assemblyRef.current && !assemblyStartingRef.current) {
+          const currentAudio = room.localParticipant.getTrackPublication(Track.Source.Microphone)?.audioTrack?.mediaStreamTrack;
+          beginTranscription(currentAudio?.readyState === "live" ? currentAudio : microphoneRef.current ?? undefined);
+        }
       } else void flush();
     }, 3000);
     return () => {

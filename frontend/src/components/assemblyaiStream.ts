@@ -9,6 +9,15 @@ export async function startAssemblyStream(audio: MediaStreamTrack, token: string
   let source: MediaStreamAudioSourceNode | null = null;
   let worklet: AudioWorkletNode | null = null;
   let silent: GainNode | null = null;
+  let watchdog: number | null = null;
+  let lastFrameAt = Date.now();
+  let failed = false;
+  let ready = false;
+  const fail = () => {
+    if (stopped || failed) return;
+    failed = true;
+    onFailure();
+  };
   try {
     await context.audioWorklet.addModule("/interview-pcm-processor.js");
     await context.resume();
@@ -20,8 +29,12 @@ export async function startAssemblyStream(audio: MediaStreamTrack, token: string
       socket!.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
-          if (message.type === "ready") { window.clearTimeout(timeout); resolve(); }
-          else if (message.type === "error") { window.clearTimeout(timeout); reject(new Error(message.message)); }
+          if (message.type === "ready") { ready = true; window.clearTimeout(timeout); resolve(); }
+          else if (message.type === "error") {
+            window.clearTimeout(timeout);
+            if (ready) fail();
+            else reject(new Error(message.message));
+          }
         } catch { /* Ignore unrecognized control messages. */ }
       };
       socket!.onerror = () => { window.clearTimeout(timeout); reject(new Error("Transcription connection failed.")); };
@@ -38,16 +51,24 @@ export async function startAssemblyStream(audio: MediaStreamTrack, token: string
     worklet.connect(silent);
     silent.connect(context.destination);
     worklet.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      lastFrameAt = Date.now();
       if (!stopped && socket?.readyState === WebSocket.OPEN) {
         if (socket.bufferedAmount < 512_000) socket.send(event.data);
-        else onFailure();
+        else fail();
       }
     };
-    socket.onclose = () => { if (!stopped) onFailure(); };
-    socket.onerror = () => { if (!stopped) onFailure(); };
+    lastFrameAt = Date.now();
+    watchdog = window.setInterval(() => {
+      if (stopped) return;
+      if (context.state === "suspended") void context.resume().catch(fail);
+      if (audio.readyState !== "live" || Date.now() - lastFrameAt > 6000) fail();
+    }, 2000);
+    socket.onclose = fail;
+    socket.onerror = fail;
     return { stop: async () => {
       if (stopped) return;
       stopped = true;
+      if (watchdog !== null) window.clearInterval(watchdog);
       source?.disconnect(); worklet?.disconnect(); silent?.disconnect();
       await context.close();
       if (socket?.readyState === WebSocket.OPEN) {
@@ -61,6 +82,7 @@ export async function startAssemblyStream(audio: MediaStreamTrack, token: string
     } };
   } catch (error) {
     stopped = true;
+    if (watchdog !== null) window.clearInterval(watchdog);
     socket?.close();
     source?.disconnect(); worklet?.disconnect(); silent?.disconnect();
     await context.close();
