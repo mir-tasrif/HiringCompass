@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
 import jwt
+import uuid
 
 from app.api.routers.interview_stream import final_turn, turn_times
+from app.services import interview_stream_health as health
 from app.core.config import Settings
 from app.services.interviews import stt_token
 
@@ -30,3 +32,17 @@ def test_stream_token_is_scoped_to_interview_and_speaker():
     assert claims["purpose"] == "interview_stt"
     assert claims["sid"] == "interview-id"
     assert claims["role"] == "candidate"
+
+
+def test_transcription_status_distinguishes_active_audio_and_interrupted_stream():
+    session_id = uuid.uuid4()
+    assert health.snapshot(session_id)["candidate"] == "not_started"
+    health.opened(session_id, "candidate", "first")
+    assert health.snapshot(session_id)["candidate"] == "no_audio"
+    health.audio_received(session_id, "candidate", "first")
+    assert health.snapshot(session_id)["candidate"] == "streaming"
+    health.opened(session_id, "candidate", "replacement")
+    health.closed(session_id, "candidate", "first", error=True)
+    assert health.snapshot(session_id)["candidate"] == "no_audio"
+    health.closed(session_id, "candidate", "replacement", error=True)
+    assert health.snapshot(session_id)["candidate"] == "interrupted"

@@ -1,12 +1,11 @@
 // F5 recruiter workspace: batch selection, evidence, correction, and F6 handoff review.
 import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../api/client";
-import { correctF5Grouping, correctF5Turn, f5Roster, f5Runs, F5Group, F5Ready, F5Run, reviewF5, startF5 } from "../api/f5";
+import { correctF5Grouping, correctF5Turn, f5Roster, f5Runs, F5Group, F5Ready, F5Run, reviewF5 } from "../api/f5";
 
-export default function F5AnalysisPanel({ reviewOnly = false }: { reviewOnly?: boolean }) {
+export default function F5AnalysisPanel({ reviewOnly = false, applicationId, refreshKey }: { reviewOnly?: boolean; applicationId?: string | null; refreshKey?: number }) {
   const [roster, setRoster] = useState<F5Ready[]>([]);
   const [runs, setRuns] = useState<F5Run[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -17,12 +16,12 @@ export default function F5AnalysisPanel({ reviewOnly = false }: { reviewOnly?: b
   const [notice, setNotice] = useState<string | null>(null);
   const load = async () => { const [nextRoster, nextRuns] = await Promise.all([f5Roster(), f5Runs()]); setRoster(nextRoster); setRuns(nextRuns); };
   useEffect(() => { void load().catch(() => setError("Could not load F5 analysis.")); }, []);
+  useEffect(() => { if (refreshKey) void load().catch(() => setError("Could not refresh F5 analysis.")); }, [refreshKey]);
   useEffect(() => { const timer = window.setInterval(() => { void load().catch(() => undefined); }, 5000); return () => window.clearInterval(timer); }, []);
   const current = useMemo(() => new Map(roster.map((item) => [item.application_id, item.interview_id])), [roster]);
-  const visibleRuns = runs.filter((run) => !reviewOnly || run.status === "completed" && run.review_status === "pending" && current.get(run.application_id) === run.interview_id);
+  const visibleRuns = runs.filter((run) => reviewOnly ? run.status === "completed" && run.review_status === "pending" && current.get(run.application_id) === run.interview_id : !applicationId || run.application_id === applicationId);
   const active = visibleRuns.find((run) => run.id === activeId) ?? visibleRuns[0];
   useEffect(() => { setGroupDraft(null); setEditing(null); }, [active?.id]);
-  const eligible = roster.filter((item) => ["ready", "outdated", "failed"].includes(item.analysis_status));
   const act = async (operation: () => Promise<unknown>, message: string) => {
     setBusy(true); setError(null); setNotice(null);
     try { await operation(); await load(); setNotice(message); }
@@ -32,23 +31,19 @@ export default function F5AnalysisPanel({ reviewOnly = false }: { reviewOnly?: b
   return <section className="card f5-workspace" aria-label={reviewOnly ? "F5 human review" : "F5 Q&A analysis"}>
     <div className="cv-batch-heading"><div><p className="eyebrow">F5 · INTERVIEW Q&A</p><h3>{reviewOnly ? "F5 results awaiting review" : "Analyse interview answers"}</h3></div></div>
     {error && <p className="error" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}
-    {!reviewOnly && <><p className="muted">Choose up to 20 candidates. Each result uses that candidate’s latest handed-off transcript and saved job requirements.</p>
-      <div className="f5-roster">{eligible.map((item) => <label key={item.application_id}><input type="checkbox" checked={selected.has(item.application_id)}
-        onChange={() => setSelected((current) => { const next = new Set(current); next.has(item.application_id) ? next.delete(item.application_id) : next.add(item.application_id); return next; })} />
-        {item.job_code} · candidate{String(item.candidate_number).padStart(3, "0")} · {item.candidate_name} · {item.analysis_status}</label>)}</div>
-      <button type="button" disabled={!selected.size || selected.size > 20 || busy} onClick={() => void act(async () => { await startF5([...selected]); setSelected(new Set()); }, "F5 analysis queued.")}>Start F5 analysis ({selected.size})</button>
-    </>}
-    <div className="f5-run-list">{visibleRuns.map((run) => <button type="button" className={active?.id === run.id ? "active" : "secondary"} key={run.id} onClick={() => setActiveId(run.id)}>
-      {roster.find((item) => item.application_id === run.application_id)?.candidate_name ?? run.application_id.slice(0, 8)} · {run.status}{run.status === "completed" ? ` · ${run.result?.overall_score ?? "—"}/100${run.result?.provisional ? " provisional" : ""}` : ""}
-      {current.get(run.application_id) !== run.interview_id ? " · outdated" : ""}
-    </button>)}</div>
-    {active && <div className="f5-result"><h4>Analysis · {active.status} · {active.review_status}</h4>
+    {visibleRuns.length > 0 && <label className="f5-run-picker">{reviewOnly ? "Result awaiting review" : "Analysis run"}<select value={active?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}>
+      {visibleRuns.map((run) => <option key={run.id} value={run.id}>{roster.find((item) => item.application_id === run.application_id)?.candidate_name ?? run.application_id.slice(0, 8)} · {run.status} · {run.created_at ? new Date(run.created_at).toLocaleString() : "pending"}{current.get(run.application_id) !== run.interview_id ? " · older interview" : ""}</option>)}
+    </select></label>}
+    {active && <div className="f5-content"><div className="f5-result"><h4>Analysis · {active.status} · {active.review_status}</h4>
+      {active.progress && active.status !== "completed" && <p className="muted" role="status">Evaluated {active.progress.completed} of {active.progress.total} question groups. Progress is saved while the AI waits for rate limits.</p>}
+      {active.status === "queued" && active.next_retry_at && <p className="muted" role="status">Next attempt: {new Date(active.next_retry_at).toLocaleString()}.</p>}
       {active.error && <p className="error">{active.error}</p>}
       {active.result && <><p><strong>Overall: {active.result.overall_score ?? "Unavailable"}/100</strong>{active.result.provisional ? " · Provisional: at least one technical score used AI knowledge without approved-document verification." : " · Supported by approved technical documents."}</p>
         <h4>Requirement coverage</h4><ul>{active.result.coverage.map((row, index) => <li key={index}>{row.requirement} · <strong>{row.status.replace(/_/g, " ")}</strong></li>)}</ul>
         <h4>Questions and answers</h4>{active.result.evaluations.map((item, index) => <article className="history-event" key={index}><strong>{index + 1}. {item.question}</strong><p>{item.answer || "No candidate answer recorded."}</p><small>{item.relation}{item.question_started_at ? ` · ${new Date(item.question_started_at).toLocaleTimeString()}` : ""}</small>
           {item.scores ? <><p>Relevance {item.scores.relevance} · Technical accuracy {item.scores.technical_accuracy}{item.provisional ? " (provisional)" : ""} · Completeness {item.scores.completeness} · Articulation {item.scores.articulation}</p><p>{item.justification}</p><p><strong>Transcript evidence:</strong> {item.answer_evidence}</p>{item.references?.map((ref) => <p key={ref.id}>Reference: {ref.title} · {ref.text.slice(0, 300)}</p>)}</> : <p>Not evaluated: small talk or unanswered.</p>}</article>)}
       </>}
+    </div><div className="f5-footer">
       {!reviewOnly && <details><summary>Correct transcript text and rerun analysis</summary><p className="muted">Corrections are saved with the original text and reviewer identity. Saving queues a new analysis of this snapshot.</p>
         {active.transcript.map((turn) => <div className="history-event" key={turn.id}><strong>{turn.role} · {new Date(turn.started_at).toLocaleTimeString()}</strong>
           {editing === turn.id ? <><textarea value={editText} onChange={(event) => setEditText(event.target.value)} /><button type="button" disabled={!editText.trim() || busy} onClick={() => void act(() => correctF5Turn(active.id, turn.id, editText), "Correction saved; reanalysis queued.")}>Save correction</button></> : <><p>{turn.text}</p><button type="button" className="secondary" onClick={() => { setEditing(turn.id); setEditText(turn.text); }}>Edit</button></>}</div>)}
@@ -75,7 +70,8 @@ export default function F5AnalysisPanel({ reviewOnly = false }: { reviewOnly?: b
         <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Review reason" aria-label="F5 review reason" />
         <button type="button" className="danger-button" disabled={busy || !reason.trim()} onClick={() => void act(() => reviewF5(active.id, "reject_candidate", reason), "Candidate rejected with recorded reason.")}>Reject candidate</button>
       </div>}
-    </div>}
+    </div></div>}
     {reviewOnly && visibleRuns.length === 0 && <p className="muted">No F5 results await review.</p>}
+    {!reviewOnly && visibleRuns.length === 0 && <p className="muted">{applicationId ? "No analysis yet for this candidate. Select the checkbox in the list and start F5." : "Select a candidate to inspect their F5 analysis."}</p>}
   </section>;
 }

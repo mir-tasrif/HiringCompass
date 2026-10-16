@@ -7,6 +7,7 @@ import { actOnCandidateCvs, cancelCvBatchItem, CandidateAction, CandidateCv, Can
 import { loadCvPreview } from "../api/jobs";
 import CandidateStageNav, { activeCandidateStages, candidateStages } from "../components/CandidateStageNav";
 import F5AnalysisPanel from "../components/F5AnalysisPanel";
+import { f5Roster, F5Ready, startF5 } from "../api/f5";
 
 function formatBytes(bytes: number) {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -39,6 +40,17 @@ export default function Candidates() {
   const [notice, setNotice] = useState<string | null>(null);
   const [weightDialog, setWeightDialog] = useState<{ jobId: string; jobCode: string; policyVersion: number | null; applicationIds: string[]; rescore: boolean } | null>(null);
   const [weights, setWeights] = useState<Record<string, number>>({});
+  const [f5Ready, setF5Ready] = useState<F5Ready[]>([]);
+  const [f5Revision, setF5Revision] = useState(0);
+
+  useEffect(() => {
+    if (section !== "f5") return;
+    let active = true;
+    const loadRoster = () => void f5Roster().then((roster) => { if (active) setF5Ready(roster); }).catch(() => undefined);
+    loadRoster();
+    const timer = window.setInterval(loadRoster, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [section]);
 
   const refresh = async (target: CandidateSection = section) => {
     const nextItems = await listCandidateCvs(target);
@@ -131,7 +143,8 @@ export default function Candidates() {
     return next;
   });
   const selectionLimit = section === "rejected" ? 100 : 20;
-  const selectableItems = section === "scoring" ? visibleItems.filter((item) => item.stage === "scoring") : visibleItems;
+  const f5Eligible = new Set(f5Ready.filter((item) => ["ready", "outdated", "failed"].includes(item.analysis_status)).map((item) => item.application_id));
+  const selectableItems = section === "scoring" ? visibleItems.filter((item) => item.stage === "scoring") : section === "f5" ? visibleItems.filter((item) => f5Eligible.has(item.id)) : visibleItems;
   const selectAll = () => setSelected(selected.size === Math.min(selectableItems.length, selectionLimit) ? new Set() : new Set(selectableItems.slice(0, selectionLimit).map((item) => item.id)));
 
   const startBatch = async (kind: "integrity" | "ranking") => {
@@ -144,6 +157,19 @@ export default function Candidates() {
       setNotice(`${batchLabel(kind)} started for ${result.batches.reduce((total, batch) => total + batch.total, 0)} CV${selected.size === 1 ? "" : "s"}. Processing continues in the background.`);
       await refresh();
     } catch (err) { setError(err instanceof ApiError ? err.message : "Could not start CV processing."); }
+    finally { setSaving(false); }
+  };
+
+  const startF5Selection = async () => {
+    if (!selected.size || saving) return;
+    setSaving(true); setError(null); setNotice(null);
+    try {
+      await startF5([...selected]);
+      setSelected(new Set());
+      setF5Revision((current) => current + 1);
+      setNotice(`F5 analysis queued for ${selected.size} candidate${selected.size === 1 ? "" : "s"}. Progress is saved in the background.`);
+      setF5Ready(await f5Roster());
+    } catch (err) { setError(err instanceof ApiError ? err.message : "Could not start F5 analysis."); }
     finally { setSaving(false); }
   };
 
@@ -273,7 +299,6 @@ export default function Candidates() {
       <label className="candidate-search"><span className="sr-only">Search candidates</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by job or candidate" /></label>
     </div>
     {error && <p className="error" role="alert">{error}</p>}{notice && <p className="notice" role="status">{notice}</p>}
-    {section === "f5" && <F5AnalysisPanel />}
     {section === "review" && <F5AnalysisPanel reviewOnly />}
 
     {displayedBatch && <section className="cv-batch-panel card" aria-label="Background CV processing">
@@ -285,20 +310,21 @@ export default function Candidates() {
     {loading ? <section className="card empty-state">Loading candidates…</section> : <div className="submissions-layout candidates-layout">
       <section className="card cv-list" aria-label={`${title} candidate list`}>
         <div className="cv-list-toolbar">
-          {section === "uploaded" || section === "parsed" || section === "scoring" || section === "rejected" ? <>
+          {section === "uploaded" || section === "parsed" || section === "scoring" || section === "rejected" || section === "f5" ? <>
             <label className="select-all"><input type="checkbox" checked={allSelected} onChange={selectAll} disabled={!selectableItems.length} /> Select up to {selectionLimit}</label>
             <div className="candidate-actions">
               {section === "uploaded" ? <button type="button" onClick={() => void startBatch("integrity")} disabled={!selected.size || saving}>Proceed to CV integrity check and parsing{selected.size ? ` (${selected.size})` : ""}</button>
                 : section === "parsed" ? <button type="button" onClick={() => void startBatch("ranking")} disabled={!selected.size || saving}>Start Feature 1 ranking{selected.size ? ` (${selected.size})` : ""}</button>
                   : section === "scoring" ? <button type="button" onClick={() => void prepareScoring()} disabled={!selected.size || saving}>Start Feature 2 scoring{selected.size ? ` (${selected.size})` : ""}</button>
+                  : section === "f5" ? <button type="button" onClick={() => void startF5Selection()} disabled={!selected.size || saving}>{saving ? "Starting…" : `Start F5 analysis${selected.size ? ` (${selected.size})` : ""}`}</button>
                   : <button type="button" className="danger-button" onClick={() => { setAction("permanent_delete"); setReason("Recruiter permanently deleted this rejected CV."); }} disabled={!selected.size || saving}>Delete permanently{selected.size ? ` (${selected.size})` : ""}</button>}
               {section === "uploaded" && <><button type="button" className="secondary" onClick={() => setAction("reject")} disabled={!selected.size || saving}>Reject{selected.size ? ` (${selected.size})` : ""}</button><button type="button" className="danger-button" onClick={() => setAction("delete")} disabled={!selected.size || saving}>Delete{selected.size ? ` (${selected.size})` : ""}</button></>}
             </div>
           </> : <span className="muted">{visibleItems.length} CV{visibleItems.length === 1 ? "" : "s"}</span>}
         </div>
         {visibleItems.length === 0 ? <div className="empty-state compact"><h2>{section === "uploaded" ? "No uploaded CVs yet" : `No ${title.toLowerCase()} yet`}</h2><p className="muted">{section === "uploaded" ? "CVs uploaded from the Jobs page will appear here." : "Candidates will appear here as they reach this step."}</p></div> : <ul className="cv-submission-list">
-          {visibleItems.map((item) => <li className={`cv-submission${item.id === previewId ? " active" : ""}${section !== "uploaded" && section !== "parsed" && section !== "scoring" && section !== "rejected" ? " no-checkbox" : ""}`} key={item.id}>
-            {(section === "uploaded" || section === "parsed" || section === "rejected" || section === "scoring" && item.stage === "scoring") && <input aria-label={`Select ${item.candidate_name}`} type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} />}
+          {visibleItems.map((item) => <li className={`cv-submission${item.id === previewId ? " active" : ""}${section !== "uploaded" && section !== "parsed" && section !== "scoring" && section !== "rejected" && section !== "f5" ? " no-checkbox" : ""}`} key={item.id}>
+            {(section === "uploaded" || section === "parsed" || section === "rejected" || section === "scoring" && item.stage === "scoring" || section === "f5") && <input aria-label={`Select ${item.candidate_name}${section === "f5" ? " for F5 analysis" : ""}`} type="checkbox" checked={selected.has(item.id)} disabled={section === "f5" && !f5Eligible.has(item.id)} onChange={() => toggle(item.id)} />}
             <button type="button" className="cv-open" onClick={() => setPreviewId(item.id)}>
               <strong>{item.job_code} · {item.job_title} · {section === "f5" && /^candidate\d+$/i.test(item.candidate_name) && typeof item.parsed_profile?.candidate_name === "string" ? item.parsed_profile.candidate_name : item.candidate_name}</strong>
               <span>{item.original_filename || `${item.candidate_name}.pdf`}</span>
@@ -309,7 +335,7 @@ export default function Candidates() {
               {section === "review" && <span className={item.stage === "f2_review" || item.stage === "f1_review" && item.screening?.mandatory_pass ? "review-summary-pass" : "review-summary-fail"}>{item.stage === "integrity_review" ? `F11 review required · ${item.integrity_signals.length} signal(s)` : item.stage === "f2_review" ? `F2 Scoring Review · ${item.scoring?.aggregate_score ?? "—"}/100 · recruiter decision needed` : item.screening?.mandatory_pass ? `F1 review · Mandatory requirements met · Rank #${item.screening.rank ?? "pending"} · ${item.screening.suitability_score}% match` : `F1 review · Screened out by mandatory gate · No rank · ${item.screening?.suitability_score ?? 0}% match`}</span>}
               {section === "scoring" && <span className={item.scoring_task_status === "failed" && item.stage === "scoring_processing" ? "rejection-summary" : "candidate-score"}>{item.stage === "scoring" ? "Ready for F2 scoring" : item.stage === "scoring_processing" && item.scoring_task_status === "failed" ? `F2 scoring failed · ${item.scoring_task_error ?? "Retry this CV"}` : item.stage === "scoring_processing" ? item.scoring_task_status === "queued" ? `F2 scoring queued${item.scoring_task_next_attempt_at ? ` · retry after ${new Date(item.scoring_task_next_attempt_at).toLocaleTimeString()}` : " · waiting for worker"}` : "F2 scoring in progress" : `F2 score ${item.scoring?.aggregate_score ?? "—"}/100 · ${item.stage === "interview_selection" ? "selected for interview" : "awaiting review"}`}</span>}
               {section === "interview" && <span className="candidate-score">Selected for interview · F2 score {item.scoring?.aggregate_score ?? "—"}/100</span>}
-              {section === "f5" && <span className="candidate-score">Transcript ready · {item.f5_interview_ended_at ? new Date(item.f5_interview_ended_at).toLocaleString() : "Latest interview"} · F1 {item.screening?.suitability_score ?? "—"}% · F2 {item.scoring?.aggregate_score ?? "—"}/100</span>}
+              {section === "f5" && <span className="candidate-score">{f5Ready.find((entry) => entry.application_id === item.id)?.analysis_status ?? "Transcript ready"} · {item.f5_interview_ended_at ? new Date(item.f5_interview_ended_at).toLocaleString() : "Latest interview"} · F1 {item.screening?.suitability_score ?? "—"}% · F2 {item.scoring?.aggregate_score ?? "—"}/100</span>}
               {section === "ranking" && (item.stage === "ranking" ? <span className={item.ranking_task_status === "failed" ? "rejection-summary" : "candidate-score"}>
                 {item.ranking_task_status === "failed" ? `F1 ranking failed · ${item.ranking_task_error ?? "Retry this CV"}` : item.ranking_task_status === "queued" ? `F1 ranking queued${item.ranking_task_next_attempt_at ? ` · retry after ${new Date(item.ranking_task_next_attempt_at).toLocaleTimeString()}` : " · waiting for worker"}` : "F1 ranking in progress"}
               </span> : item.screening && <span className="candidate-score">Rank #{item.screening.rank ?? "—"} · {item.screening.suitability_score}% · {item.screening.mandatory_pass ? "Mandatory gate passed" : "Screened out"}</span>)}
@@ -326,11 +352,11 @@ export default function Candidates() {
         {activePreview ? <>
           <div className="preview-heading"><div><strong>{activePreview.job_code} · {activePreview.job_title} · {activePreview.candidate_name}</strong><span className="muted">{activePreview.original_filename}</span></div><span className="file-badge">PDF{activePreview.converted_from_docx ? " · converted" : ""}</span></div>
           {previewUrl ? <iframe title={`CV preview: ${activePreview.candidate_name}`} src={previewUrl} /> : <div className="preview-placeholder">Loading CV preview…</div>}
-          {activePreview.parsed_profile && <div className="candidate-profile"><h3>Parsed candidate profile</h3><p><strong>Candidate name:</strong> {String(activePreview.parsed_profile.candidate_name ?? "Not identified")}</p>
+          {section !== "f5" && activePreview.parsed_profile && <div className="candidate-profile"><h3>Parsed candidate profile</h3><p><strong>Candidate name:</strong> {String(activePreview.parsed_profile.candidate_name ?? "Not identified")}</p>
             <p><strong>Email:</strong> {activePreview.candidate_email ?? "Not found in CV"}</p>
             {(["education", "experience", "skills", "certifications", "projects"] as const).map((key) => <div key={key}><h4>{stageLabel(key)}</h4><pre>{JSON.stringify(activePreview.parsed_profile?.[key] ?? [], null, 2)}</pre></div>)}
           </div>}
-          {(section === "integrity" || activePreview.integrity_verdict || activePreview.integrity_signals.length > 0) && <div className="candidate-history"><h3>F11 integrity evidence · {activePreview.integrity_verdict ? stageLabel(activePreview.integrity_verdict) : activePreview.stage === "integrity_check" ? "Processing" : activePreview.stage === "rejected" && activePreview.rejection_action === "deleted" ? "Deleted" : "Extraction failed"}</h3>
+          {section !== "f5" && (section === "integrity" || activePreview.integrity_verdict || activePreview.integrity_signals.length > 0) && <div className="candidate-history"><h3>F11 integrity evidence · {activePreview.integrity_verdict ? stageLabel(activePreview.integrity_verdict) : activePreview.stage === "integrity_check" ? "Processing" : activePreview.stage === "rejected" && activePreview.rejection_action === "deleted" ? "Deleted" : "Extraction failed"}</h3>
             {activePreview.integrity_verdict === "normal" && <p>The CV successfully passed F11 integrity checks. No suspicious document or text signals were found. Extraction method: {activePreview.extraction_method || "not available"}.</p>}
             {activePreview.integrity_signals.length === 0 && activePreview.integrity_verdict !== "normal" && <p>{activePreview.stage === "integrity_check" ? "Text extraction and integrity checks are still running." : activePreview.rejection_reason || "No detailed integrity signals were recorded."}</p>}
             {activePreview.integrity_signals.map((signal, index) => <article className="history-event" key={`${signal.code}-${index}`}><strong>{stageLabel(signal.code)} · {signal.severity}</strong><p>{signal.evidence}</p></article>)}
@@ -340,20 +366,21 @@ export default function Candidates() {
             {activePreview.integrity_task_status === "failed" && activePreview.integrity_task_id && <button type="button" onClick={() => void retry(activePreview.integrity_task_id!)} disabled={saving}>Retry this CV</button>}
             <button type="button" className="danger-button" disabled={saving} onClick={() => { setSelected(new Set([activePreview.id])); setAction("delete"); setReason("Deleted from Integrity Check so this CV can be uploaded again."); }}>Delete and allow re-upload</button>
           </div>}
-          {activePreview.screening && <div className="candidate-history"><h3>Feature 1 screening · {activePreview.screening.suitability_score}% suitability</h3><p>{activePreview.screening.explanation}</p><p><strong>{activePreview.screening.mandatory_pass ? "Mandatory requirement gate passed (met or partially met)" : "Screened out by mandatory requirement gate"}</strong> · {activePreview.screening.mandatory_pass ? `Rank #${activePreview.screening.rank ?? "pending"}` : "No rank"}</p>
+          {section !== "f5" && activePreview.screening && <div className="candidate-history"><h3>Feature 1 screening · {activePreview.screening.suitability_score}% suitability</h3><p>{activePreview.screening.explanation}</p><p><strong>{activePreview.screening.mandatory_pass ? "Mandatory requirement gate passed (met or partially met)" : "Screened out by mandatory requirement gate"}</strong> · {activePreview.screening.mandatory_pass ? `Rank #${activePreview.screening.rank ?? "pending"}` : "No rank"}</p>
             {activePreview.screening.requirements.map((requirement, index) => <article className="history-event" key={`${requirement.text}-${index}`}><strong>{requirement.kind}: {requirement.text} · {stageLabel(requirement.status)}</strong><p>{requirement.explanation}</p><p><strong>CV evidence:</strong> {requirement.evidence || "No supporting evidence found."}</p></article>)}
           </div>}
-          {activePreview.scoring && <div className="candidate-history"><h3>Feature 2 score · {activePreview.scoring.aggregate_score}/100</h3><p>Policy version {activePreview.scoring.policy_version} · {activePreview.scoring.model_name} · {new Date(activePreview.scoring.scored_at).toLocaleString()}</p>
+          {section !== "f5" && activePreview.scoring && <div className="candidate-history"><h3>Feature 2 score · {activePreview.scoring.aggregate_score}/100</h3><p>Policy version {activePreview.scoring.policy_version} · {activePreview.scoring.model_name} · {new Date(activePreview.scoring.scored_at).toLocaleString()}</p>
             {activePreview.scoring.dimensions.map((dimension) => <article className="history-event" key={dimension.key}><strong>{scoreDimensions.find((entry) => entry.key === dimension.key)?.label ?? stageLabel(dimension.key)} · {dimension.missing ? "No evidence" : `${dimension.score}/100`} · weight {activePreview.scoring?.weights[dimension.key] ?? 0}%</strong><p>{dimension.justification}</p><p><strong>CV evidence:</strong> {dimension.evidence || "No supporting evidence found."}</p></article>)}
           </div>}
           {section === "scoring" && activePreview.stage === "f2_review" && <div className="candidate-actions review-actions"><button type="button" className="secondary" onClick={() => void prepareScoring(activePreview.id)} disabled={saving}>Rescore this CV</button></div>}
           {section === "interview" && <div className="candidate-actions review-actions"><Link to={`/interviews?applicationId=${activePreview.id}`}>Schedule interview for this candidate →</Link></div>}
-          {section === "f5" && <div className="candidate-actions review-actions"><p className="muted">{activePreview.candidate_email || "No email saved"} · F1 match {activePreview.screening?.suitability_score ?? "—"}% · F2 score {activePreview.scoring?.aggregate_score ?? "—"}/100</p>{activePreview.f5_interview_id && <Link to={`/interviews/${activePreview.f5_interview_id}`}>View latest transcript →</Link>}<p className="muted">Select this candidate in the F5 analysis panel above to start or review Q&A analysis.</p></div>}
+          {section === "f5" && <div className="candidate-actions review-actions"><p className="muted">{activePreview.candidate_email || "No email saved"} · F1 match {activePreview.screening?.suitability_score ?? "—"}% · F2 score {activePreview.scoring?.aggregate_score ?? "—"}/100</p>{activePreview.f5_interview_id && <Link to={`/interviews/${activePreview.f5_interview_id}`}>View latest transcript →</Link>}</div>}
           {section === "review" && <div className="candidate-actions review-actions"><button type="button" onClick={() => void review("approve")} disabled={saving || (activePreview.stage === "f1_review" && !activePreview.screening?.mandatory_pass)}>{saving ? "Saving…" : activePreview.stage === "integrity_review" ? "Approve and continue parsing" : activePreview.stage === "f2_review" ? "Select for interview" : "Approve for Feature 2"}</button><button type="button" className="danger-button" onClick={() => void review("reject")} disabled={saving}>Reject CV</button>{activePreview.stage === "f1_review" && !activePreview.screening?.mandatory_pass && <p className="muted">The mandatory-requirement gate blocks progression. This CV can be rejected with a reason.</p>}</div>}
           {section === "rejected" && <div className="candidate-history"><h3>Decision history</h3>{activePreview.events.map((event, index) => <article className="history-event" key={`${event.created_at}-${index}`}><div><strong>{stageLabel(event.action)}</strong><span>{new Date(event.created_at).toLocaleString()}</span></div><p>Moved from {stageLabel(event.from_stage)} to {stageLabel(event.to_stage)}</p><p>{event.reason}</p></article>)}</div>}
         </> : <div className="preview-placeholder"><span aria-hidden="true">▧</span><p>Select a CV to inspect its details.</p></div>}
       </section>
     </div>}
+    {section === "f5" && <F5AnalysisPanel applicationId={previewId} refreshKey={f5Revision} />}
 
     {weightDialog && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) setWeightDialog(null); }}><form className="card decision-modal" onSubmit={(event) => void confirmScoring(event)} aria-labelledby="scoring-title">
       <p className="eyebrow">FEATURE 2 SCORING</p><h2 id="scoring-title">Confirm weights for {weightDialog.jobCode}</h2>
