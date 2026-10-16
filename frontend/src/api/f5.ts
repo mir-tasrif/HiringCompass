@@ -15,6 +15,8 @@ export interface F5Evaluation {
 export interface F5Run {
   id: string; batch_id: string; application_id: string; interview_id: string; job_version: number;
   status: string; review_status: string; review_reason: string | null; error: string | null;
+  progress: { completed: number; total: number } | null;
+  next_retry_at: string | null;
   transcript: { id: string; role: string; text: string; started_at: string }[];
   segment_overrides: F5Group[];
   corrections: { turn_id: string; before: string; after: string; actor_id: string; at: string }[];

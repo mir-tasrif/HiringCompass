@@ -37,10 +37,15 @@ class ReviewBody(BaseModel):
 
 
 def _run_out(run: F5Run) -> dict[str, Any]:
+    progress = (run.result or {}).get("_progress", {}) if run.status != "completed" else {}
     return {"id": str(run.id), "batch_id": str(run.batch_id), "application_id": str(run.application_id),
             "interview_id": str(run.interview_id), "job_version": run.job_version, "status": run.status,
             "review_status": run.review_status, "review_reason": run.review_reason,
-            "result": run.result, "transcript": run.transcript, "segment_overrides": run.segment_overrides,
+            "result": run.result if run.status == "completed" else None,
+            "progress": {"completed": len(progress.get("evaluations", [])),
+                         "total": len(progress.get("segments", []))} if progress.get("segments") else None,
+            "next_retry_at": run.next_retry_at.isoformat() if run.next_retry_at else None,
+            "transcript": run.transcript, "segment_overrides": run.segment_overrides,
             "corrections": run.corrections,
             "error": run.error, "created_at": run.created_at.isoformat() if run.created_at else None}
 

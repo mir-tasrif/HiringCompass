@@ -21,6 +21,15 @@ from app.core.logging import get_logger
 logger = get_logger("llm.client")
 
 
+def _duration_seconds(value: str) -> float | None:
+    """Parse provider reset durations such as 7.66s or 2m59.56s."""
+    parts = re.findall(r"(\d+(?:\.\d+)?)\s*(ms|h|m|s)", value.lower())
+    if not parts:
+        return None
+    multipliers = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+    return sum(float(number) * multipliers[unit] for number, unit in parts)
+
+
 # Chat goes to LLM_BASE_URL (/chat/completions); embeddings always go to the local Ollama server.
 # Failures map to Transient (retry) or Permanent (do not retry). Switch providers with LLM_PROFILE only.
 class LLMClient:
@@ -34,6 +43,8 @@ class LLMClient:
         # Remote providers commonly enforce a shared request/token window; queue chat calls locally.
         self._chat_slots = asyncio.Semaphore(1 if s.llm_profile == "remote" else s.llm_max_concurrency)
         self._chat_cooldown_until = 0.0
+        self._chat_tokens_remaining: int | None = None
+        self._chat_tokens_reset_at = 0.0
 
     # Close both HTTP connection pools.
     async def aclose(self) -> None:
@@ -50,7 +61,25 @@ class LLMClient:
                         wait = self._chat_cooldown_until - time.monotonic()
                         if wait > 0:
                             await asyncio.sleep(wait)
+                        # Groq reports remaining tokens and reset time after each call.
+                        # Pace the next call before it triggers another 429.
+                        if self._chat_tokens_remaining is not None:
+                            if time.monotonic() >= self._chat_tokens_reset_at:
+                                self._chat_tokens_remaining = None
+                            elif payload is not None:
+                                estimate = len(json.dumps(payload, ensure_ascii=False)) // 3 + 800
+                                if estimate > self._chat_tokens_remaining:
+                                    await asyncio.sleep(self._chat_tokens_reset_at - time.monotonic())
+                                    self._chat_tokens_remaining = None
                         response = await http.request(method, path, json=payload)
+                        remaining = response.headers.get("x-ratelimit-remaining-tokens")
+                        reset = _duration_seconds(response.headers.get("x-ratelimit-reset-tokens", ""))
+                        if remaining is not None and reset is not None:
+                            try:
+                                self._chat_tokens_remaining = max(0, int(float(remaining)))
+                                self._chat_tokens_reset_at = time.monotonic() + reset
+                            except ValueError:
+                                pass
                         if response.status_code == 429:
                             self._chat_cooldown_until = max(self._chat_cooldown_until, time.monotonic() + 60)
                 else:

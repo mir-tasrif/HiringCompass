@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.core.config import Settings
+from app.core.errors import TransientError
 from app.core.logging import get_logger
 from app.db.models import Application, F5Batch, F5Run, JobVersion
 from app.graphs.f5_interview_analysis.graph import build_f5_graph
@@ -46,7 +47,7 @@ async def run_f5_worker(session_factory: async_sessionmaker[AsyncSession], setti
                     .order_by(F5Run.created_at).with_for_update(skip_locked=True).limit(1))
                 if run is not None:
                     run.status, run.attempts = "processing", run.attempts + 1
-                    run.next_retry_at = None
+                    run.next_retry_at, run.error = None, None
                     run.lease_expires_at = now + timedelta(minutes=30)
                     run_id, batch_id = run.id, run.batch_id
                     await _batch_status(session, batch_id)
@@ -65,8 +66,10 @@ async def run_f5_worker(session_factory: async_sessionmaker[AsyncSession], setti
                     transcript = run.transcript
                     segment_overrides = run.segment_overrides
                     requirements = version.profile.get("requirements", [])
+                    progress = (run.result or {}).get("_progress", {})
                 result = await graph.ainvoke({"transcript": transcript, "requirements": requirements,
-                                              "segment_overrides": segment_overrides},
+                                              "segment_overrides": segment_overrides,
+                                              "run_id": str(run_id), "resume_progress": progress},
                                              {"configurable": {"thread_id": f"f5-{run_id}"}})
                 async with session_factory() as session:
                     run = await session.get(F5Run, run_id)
@@ -79,12 +82,22 @@ async def run_f5_worker(session_factory: async_sessionmaker[AsyncSession], setti
                 async with session_factory() as session:
                     run = await session.get(F5Run, run_id)
                     run.error, run.lease_expires_at = str(exc)[:1000], None
-                    run.status = "queued" if run.attempts < settings.worker_max_attempts else "failed"
-                    run.next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=min(
-                        settings.worker_backoff_max_seconds, settings.worker_backoff_base_seconds * 2 ** (run.attempts - 1)))) if run.status == "queued" else None
+                    rate_limited = isinstance(exc, TransientError) and "HTTP 429" in str(exc)
+                    # A quota window eventually resets. Keep this run queued with its saved
+                    # progress instead of exhausting attempts and repeating the whole analysis.
+                    run.status = "queued" if rate_limited or run.attempts < settings.worker_max_attempts else "failed"
+                    delay = min(settings.worker_backoff_max_seconds,
+                                settings.worker_backoff_base_seconds * 2 ** min(run.attempts - 1, 10))
+                    if rate_limited:
+                        delay = max(delay, 60, exc.retry_after_seconds or 0)
+                    run.next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)) if run.status == "queued" else None
                     await _batch_status(session, batch_id)
                     await session.commit()
-                logger.exception("F5 run failed", extra={"run_id": str(run_id)})
+                if rate_limited:
+                    logger.warning("F5 paused for AI rate limit", extra={"run_id": str(run_id),
+                                   "retry_seconds": delay, "attempt": run.attempts})
+                else:
+                    logger.exception("F5 run failed", extra={"run_id": str(run_id)})
         except asyncio.CancelledError:
             raise
         except Exception:
