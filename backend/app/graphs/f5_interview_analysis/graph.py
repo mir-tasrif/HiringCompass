@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from app.llm.structured import generate_structured, wrap_untrusted
+from app.db.models import F5Run
 from app.prompts.system import F5_EVALUATE, F5_SEGMENT
 
 
@@ -36,6 +39,8 @@ class AnswerScores(BaseModel):
 
 
 class F5State(TypedDict, total=False):
+    run_id: str
+    resume_progress: dict[str, Any]
     transcript: list[dict[str, Any]]
     requirements: list[dict[str, Any]]
     segment_overrides: list[dict[str, Any]]
@@ -51,29 +56,67 @@ def _valid_indexes(indexes: list[int], transcript: list[dict[str, Any]], role: s
     return list(dict.fromkeys(i for i in indexes if 0 <= i < len(transcript) and transcript[i]["role"] == role))
 
 
+def segmentation_windows(transcript: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    """Bound grouping prompts and overlap neighboring windows by four turns."""
+    windows = []
+    start = 0
+    while start < len(transcript):
+        end, characters = start, 0
+        while end < len(transcript) and end - start < 24:
+            size = min(len(str(transcript[end]["text"])), 1200)
+            if end > start + 4 and characters + size > 8000:
+                break
+            characters += size
+            end += 1
+        windows.append((start, end))
+        if end == len(transcript):
+            break
+        start = max(start + 1, end - 4)
+    return windows
+
+
 def build_f5_graph(llm: Any, store: Any, session_factory: Any, namespace: str, checkpointer: Any = None) -> Any:
     """Construct an independent graph; the durable worker invokes it per F5 run."""
+    async def save_progress(state: F5State, progress: dict[str, Any]) -> None:
+        """Persist completed steps so a rate limit never repeats earlier evaluations."""
+        if not state.get("run_id"):
+            return
+        async with session_factory() as db:
+            run = await db.get(F5Run, uuid.UUID(state["run_id"]))
+            if run is not None and run.status == "processing":
+                run.result = {"_progress": progress}
+                run.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+                await db.commit()
+
     async def segment(state: F5State) -> dict[str, Any]:
         transcript = state["transcript"]
+        progress = state.get("resume_progress") or {}
+        if progress.get("segments") is not None:
+            return {"segments": progress["segments"], "prompt_versions": progress["prompt_versions"]}
         if state.get("segment_overrides"):
-            batches = [(0, Segments.model_validate({"segments": state["segment_overrides"]}))]
+            batches = [(0, len(transcript), Segments.model_validate({"segments": state["segment_overrides"]}))]
         else:
             batches = []
-            # Overlapping windows keep long interviews within the model's context while preserving boundary Q&A.
-            for start in range(0, len(transcript), 50):
-                if start and start + 10 >= len(transcript):
-                    break
-                window = transcript[start:start + 60]
-                raw = await generate_structured(llm, Segments, system=F5_SEGMENT.text,
-                    user=wrap_untrusted("interview_turns", json.dumps([
-                        {"index": i, "role": t["role"], "text": t["text"]} for i, t in enumerate(window)
-                    ], ensure_ascii=False)) + "\n" + wrap_untrusted("job_requirements", json.dumps([
-                        {"index": i, "text": r.get("text", "")} for i, r in enumerate(state["requirements"])
-                    ], ensure_ascii=False)))
-                batches.append((start, raw))
+            saved_batches = {int(item["start"]): item for item in progress.get("segment_batches", [])}
+            # Keep each request below the remote provider's per-minute token budget.
+            # Four-turn overlap preserves Q&A pairs that cross a window boundary.
+            for start, end in segmentation_windows(transcript):
+                window = transcript[start:end]
+                if start in saved_batches and saved_batches[start]["length"] == len(window):
+                    raw = Segments.model_validate(saved_batches[start]["data"])
+                else:
+                    raw = await generate_structured(llm, Segments, system=F5_SEGMENT.text,
+                        user=wrap_untrusted("interview_turns", json.dumps([
+                            {"index": i, "role": t["role"], "text": t["text"][:1200]} for i, t in enumerate(window)
+                        ], ensure_ascii=False)) + "\n" + wrap_untrusted("job_requirements", json.dumps([
+                            {"index": i, "text": r.get("text", "")} for i, r in enumerate(state["requirements"])
+                        ], ensure_ascii=False)))
+                    saved_batches[start] = {"start": start, "length": len(window), "data": raw.model_dump()}
+                    await save_progress(state, {"segment_batches": list(saved_batches.values()), "evaluations": [],
+                                                "prompt_versions": {"segment": F5_SEGMENT.version, "evaluate": F5_EVALUATE.version}})
+                batches.append((start, len(window), raw))
         by_question = {}
-        for offset, batch in batches:
-            window_size = len(transcript) if state.get("segment_overrides") else min(60, len(transcript) - offset)
+        for offset, window_size, batch in batches:
             for item in batch.segments:
                 questions = _valid_indexes([i + offset for i in item.question_turns if 0 <= i < window_size], transcript, "interviewer")
                 answers = _valid_indexes([i + offset for i in item.answer_turns if 0 <= i < window_size], transcript, "candidate")
@@ -89,12 +132,15 @@ def build_f5_graph(llm: Any, store: Any, session_factory: Any, namespace: str, c
                 if key not in by_question or len(answers) > len(by_question[key]["answer_turns"]):
                     by_question[key] = entry
         cleaned = sorted(by_question.values(), key=lambda entry: entry["question_turns"][0])
-        return {"segments": cleaned, "prompt_versions": {"segment": F5_SEGMENT.version, "evaluate": F5_EVALUATE.version}}
+        versions = {"segment": F5_SEGMENT.version, "evaluate": F5_EVALUATE.version}
+        await save_progress(state, {"segments": cleaned, "evaluations": [], "prompt_versions": versions})
+        return {"segments": cleaned, "prompt_versions": versions}
 
     async def evaluate(state: F5State) -> dict[str, Any]:
         transcript, requirements = state["transcript"], state["requirements"]
-        evaluations = []
-        for segment in state["segments"]:
+        progress = state.get("resume_progress") or {}
+        evaluations = list(progress.get("evaluations") or [])
+        for segment in state["segments"][len(evaluations):]:
             question = " ".join(transcript[i]["text"] for i in segment["question_turns"])
             answer = " ".join(transcript[i]["text"] for i in segment["answer_turns"])
             entry = {**segment, "question": question, "answer": answer,
@@ -104,14 +150,16 @@ def build_f5_graph(llm: Any, store: Any, session_factory: Any, namespace: str, c
                      "answer_started_at": transcript[segment["answer_turns"][0]].get("started_at") if segment["answer_turns"] else None}
             if not segment["evaluable"]:
                 evaluations.append({**entry, "scores": None, "reason": "Small talk or no candidate answer."})
+                await save_progress(state, {"segments": state["segments"], "evaluations": evaluations,
+                                            "prompt_versions": state["prompt_versions"]})
                 continue
             try:
                 async with session_factory() as db:
-                    chunks = await store.search(db, namespace=namespace, query=question + " " + answer[:600], top_k=4)
+                    chunks = await store.search(db, namespace=namespace, query=question + " " + answer[:400], top_k=2)
             except Exception:
                 chunks = []
             references = [{"id": str(c.chunk_id), "title": c.title, "uri": c.source_uri,
-                           "version": c.version, "text": c.content[:1500]} for c in chunks if c.score >= 0.35]
+                           "version": c.version, "text": c.content[:800]} for c in chunks if c.score >= 0.35]
             result = await generate_structured(llm, AnswerScores, system=F5_EVALUATE.text,
                 user=wrap_untrusted("question", question) + "\n" + wrap_untrusted("candidate_answer", answer)
                 + "\n" + wrap_untrusted("relevant_job_requirements", json.dumps([
@@ -127,6 +175,8 @@ def build_f5_graph(llm: Any, store: Any, session_factory: Any, namespace: str, c
                 "provisional": not verified, "justification": result.justification,
                 "answer_evidence": result.answer_evidence if result.answer_evidence.strip() in answer else answer[:300],
                 "references": valid_references})
+            await save_progress(state, {"segments": state["segments"], "evaluations": evaluations,
+                                        "prompt_versions": state["prompt_versions"]})
         return {"evaluations": evaluations}
 
     def coverage(state: F5State) -> dict[str, Any]:
