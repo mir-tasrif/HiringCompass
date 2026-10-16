@@ -71,6 +71,8 @@ async def _serialize(session: AsyncSession, record: InterviewSession) -> Intervi
     application = await session.get(Application, record.application_id)
     candidate = await session.get(Candidate, application.candidate_id)
     job = await session.get(Job, record.job_id)
+    version = await session.scalar(select(JobVersion).where(JobVersion.job_id == record.job_id,
+                                                           JobVersion.version == application.job_version))
     profile = await session.scalar(select(CandidateProfile).where(CandidateProfile.application_id == record.application_id))
     screening = await session.scalar(select(CandidateScreening).where(CandidateScreening.application_id == record.application_id))
     score = await session.scalar(select(CandidateScore).where(CandidateScore.application_id == record.application_id)
@@ -93,7 +95,8 @@ async def _serialize(session: AsyncSession, record: InterviewSession) -> Intervi
         candidate_profile=profile.profile if profile else None,
         f1={"score": screening.suitability_score, "requirements": screening.requirements} if screening else None,
         f2={"score": score.aggregate_score, "dimensions": score.dimensions} if score else None,
-        transcript_turn_count=turn_count, f5_ready=bool(latest and latest.id == record.id))
+        transcript_turn_count=turn_count, f5_ready=bool(latest and latest.id == record.id),
+        job_description=version.profile if version else {})
 
 
 @router.get("", response_model=list[InterviewOut])
@@ -388,5 +391,5 @@ async def guest_audio(chunk_id: str = Form(), started_at: datetime = Form(), end
 async def interview_assist(session_id: uuid.UUID, body: AskBody, request: Request,
     user: User = Depends(get_current_interviewer), session: AsyncSession = Depends(get_session)) -> dict:
     record = await _owned(session, session_id, user)
-    return {"answer": await answer_recruiter(session, record, body.question,
-                                             request.app.state.chat_runtime, settings)}
+    return await answer_recruiter(session, record, body.question,
+                                  request.app.state.chat_runtime, settings)

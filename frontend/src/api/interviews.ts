@@ -8,7 +8,8 @@ export interface Interview {
   status: string; invitation_sent_at: string | null; candidate_waiting_at: string | null;
   candidate_admitted_at: string | null; candidate_joined_at: string | null;
   interviewer_joined_at: string | null; started_at: string | null; ended_at: string | null;
-  questions: { text: string; source: string }[];
+  questions: { text: string; source: string; reference_answer?: string; requirement?: string }[];
+  job_description: Record<string, unknown>;
   candidate_profile: Record<string, unknown> | null;
   f1: { score: number; requirements: unknown[] } | null;
   f2: { score: number; dimensions: { key: string; score: number; justification: string; missing?: boolean }[] } | null;
@@ -33,6 +34,8 @@ export const connectGoogleCalendar = (): Promise<CalendarConnection> =>
 export const disconnectGoogleCalendar = (): Promise<{ disconnected: boolean }> =>
   apiFetch("/interviews/google-calendar/connect", { method: "DELETE" });
 export const getInterview = (id: string): Promise<Interview> => apiFetch(`/interviews/${id}`);
+export interface TranscriptionStatus { interviewer: "not_started" | "streaming" | "no_audio" | "interrupted" | "stopped"; candidate: "not_started" | "streaming" | "no_audio" | "interrupted" | "stopped" }
+export const getTranscriptionStatus = (id: string): Promise<TranscriptionStatus> => apiFetch(`/interviews/${id}/transcription-status`);
 export const scheduleInterview = (applicationId: string, candidateEmail: string, scheduledAt: string, timezoneName: string): Promise<Interview> =>
   apiFetch("/interviews", { method: "POST", body: JSON.stringify({ application_id: applicationId, candidate_email: candidateEmail, scheduled_at: scheduledAt, timezone_name: timezoneName }) });
 export const rescheduleInterview = (id: string, candidateEmail: string, scheduledAt: string, timezoneName: string): Promise<Interview> =>
@@ -48,7 +51,8 @@ export const endInterview = (id: string): Promise<Interview> => apiFetch(`/inter
 export const recruiterJoin = (id: string): Promise<JoinCredentials> =>
   apiFetch(`/interviews/${id}/room-token`, { method: "POST", body: JSON.stringify({ consent: true }) });
 export const listTranscript = (id: string): Promise<TranscriptTurn[]> => apiFetch(`/interviews/${id}/turns`);
-export const askInterviewAssistant = (id: string, question: string): Promise<{ answer: string }> =>
+export interface AssistantResponse { mode: "answer" | "suggested_question"; answer: string; question?: string; reference_answer?: string; requirement?: string }
+export const askInterviewAssistant = (id: string, question: string): Promise<AssistantResponse> =>
   apiFetch(`/interviews/${id}/assist`, { method: "POST", body: JSON.stringify({ question }) });
 
 async function guestFetch<T>(path: string, invitation: string, init: RequestInit = {}): Promise<T> {

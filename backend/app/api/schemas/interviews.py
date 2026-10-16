@@ -47,6 +47,7 @@ class InterviewOut(BaseModel):
     started_at: datetime | None
     ended_at: datetime | None
     questions: list[dict]
+    job_description: dict = {}
     candidate_profile: dict | None = None
     f1: dict | None = None
     f2: dict | None = None

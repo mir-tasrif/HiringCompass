@@ -3,9 +3,9 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import InterviewCall, { InterviewCallHandle } from "../components/InterviewCall";
 import FormattedMessage from "../components/FormattedMessage";
-import { admitInterview, askInterviewAssistant, endInterview, getInterview, Interview,
+import { admitInterview, askInterviewAssistant, endInterview, getInterview, getTranscriptionStatus, Interview,
   JoinCredentials, listTranscript, recruiterJoin, regenerateQuestions, startInterview,
-  TranscriptTurn, updateQuestions } from "../api/interviews";
+  TranscriptTurn, TranscriptionStatus, updateQuestions } from "../api/interviews";
 
 const profileOrder = ["summary", "skills", "experience", "projects", "education", "certifications"];
 const dimensionLabels: Record<string, string> = {
@@ -14,7 +14,11 @@ const dimensionLabels: Record<string, string> = {
   certifications_soft_skills: "Certifications & soft skills",
   education_qualifications: "Education & qualifications",
 };
-type AssistantMessage = { id: string; role: "recruiter" | "assistant"; text: string; pending?: boolean };
+const transcriptionLabels: Record<TranscriptionStatus["candidate"], string> = {
+  not_started: "not started", streaming: "receiving audio", no_audio: "audio not arriving",
+  interrupted: "connection interrupted", stopped: "stopped",
+};
+type AssistantMessage = { id: string; role: "recruiter" | "assistant"; text: string; pending?: boolean; suggestion?: { question: string; reference_answer: string; requirement?: string } };
 const profileLabel = (key: string) => key.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const profileText = (value: unknown): string => Array.isArray(value)
   ? value.map(profileText).filter(Boolean).join(", ")
@@ -41,6 +45,29 @@ function ProfileSection({ name, value }: { name: string; value: unknown }) {
   </section>;
 }
 
+function JobDescriptionSection({ job, onGenerate, disabled }: { job: Record<string, unknown>; onGenerate: () => void; disabled: boolean }) {
+  const requirements = Array.isArray(job.requirements) ? job.requirements : [];
+  const items = (kind: string) => requirements.map((item) => {
+    if (typeof item === "string") return kind === "required" ? item : null;
+    if (!item || typeof item !== "object") return null;
+    const value = item as Record<string, unknown>;
+    const itemKind = String(value.kind ?? value.type ?? value.category ?? "required").toLowerCase();
+    const matches = kind === "required" ? (itemKind.includes("required") || itemKind.includes("mandatory")) : itemKind.includes(kind);
+    return matches ? String(value.text ?? value.name ?? value.requirement ?? "").trim() : null;
+  }).filter((item): item is string => Boolean(item));
+  const listSection = (title: string, values: string[]) => values.length ? <section className="interview-jd-section"><h3>{title}</h3><ul>{values.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ul></section> : null;
+  const responsibilities = Array.isArray(job.responsibilities) ? job.responsibilities.map(String) : [];
+  return <div className="interview-job-description"><div className="interview-questions-heading"><div><p className="eyebrow">JOB DESCRIPTION</p><h2>{String(job.title || "Job description")}</h2></div>
+    {!disabled && <button className="secondary" onClick={onGenerate}>Generate questions from JD</button>}</div>
+    {Boolean(job.summary) && <section className="interview-jd-section"><h3>Summary</h3><p>{String(job.summary)}</p></section>}
+    {listSection("Responsibilities", responsibilities)}
+    {listSection("Required qualifications", items("required"))}
+    {listSection("Preferred qualifications", items("preferred"))}
+    <div className="interview-jd-meta">{["location", "employment_type", "experience", "education"].map((key) => job[key] ? <div key={key}><b>{profileLabel(key)}:</b> {profileText(job[key])}</div> : null)}</div>
+    {Array.isArray(job.benefits) && listSection("Benefits", job.benefits.map(String))}
+  </div>;
+}
+
 function displayCandidateName(session: Interview | null): string {
   if (!session) return "Candidate";
   const parsedName = session.candidate_profile?.candidate_name;
@@ -53,6 +80,7 @@ export default function InterviewRoom() {
   const { sessionId = "" } = useParams();
   const [session, setSession] = useState<Interview | null>(null);
   const [turns, setTurns] = useState<TranscriptTurn[]>([]);
+  const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
   const [credentials, setCredentials] = useState<JoinCredentials | null>(null);
   const callRef = useRef<InterviewCallHandle>(null);
   const [callState, setCallState] = useState({ connection: "Connecting…", mic: true, camera: true, ending: false });
@@ -64,6 +92,7 @@ export default function InterviewRoom() {
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const assistantMessagesRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<"transcript" | "assistant">("transcript");
+  const [guideTab, setGuideTab] = useState<"questions" | "jd">("questions");
   const [busy, setBusy] = useState(false);
   const [ending, setEnding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +109,17 @@ export default function InterviewRoom() {
     const timer = window.setInterval(refresh, 2500);
     return () => { active = false; window.clearInterval(timer); };
   }, [sessionId]);
+
+  useEffect(() => {
+    if (session?.status !== "live") return;
+    let active = true;
+    const refresh = () => void getTranscriptionStatus(sessionId).then((status) => {
+      if (active) setTranscriptionStatus(status);
+    }).catch(() => { if (active) setTranscriptionStatus(null); });
+    refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [sessionId, session?.status]);
 
   const act = async (operation: () => Promise<Interview>) => {
     setBusy(true); setError(null);
@@ -130,7 +170,10 @@ export default function InterviewRoom() {
     try {
       const response = await askInterviewAssistant(sessionId, prompt);
       setAssistantMessages((current) => current.map((message) => message.id === responseId
-        ? { ...message, text: response.answer, pending: false } : message));
+        ? { ...message, text: response.answer, pending: false,
+            suggestion: response.mode === "suggested_question" && response.question ? {
+              question: response.question, reference_answer: response.reference_answer || "A strong answer should include a specific example and explain the result.", requirement: response.requirement,
+            } : undefined } : message));
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Interview assistant is unavailable.";
       setAssistantMessages((current) => current.map((entry) => entry.id === responseId
@@ -165,6 +208,10 @@ export default function InterviewRoom() {
         </div>
         {session?.status === "live" && <div className="interview-rail-controls">
           <p className="muted" role="status">{credentials ? callState.connection : "Outside the call · interview live"}</p>
+          {transcriptionStatus && <div className="interview-stt-status" role="status" aria-label="Transcription connection status">
+            <span>Candidate transcript: {transcriptionLabels[transcriptionStatus.candidate]}</span>
+            <span>Your transcript: {transcriptionLabels[transcriptionStatus.interviewer]}</span>
+          </div>}
           {credentials ? <>
             <button type="button" className="secondary" onClick={() => void callRef.current?.toggleMic()}>{callState.mic ? "Mute" : "Unmute"}</button>
             <button type="button" className="secondary" onClick={() => void callRef.current?.toggleCamera()}>{callState.camera ? "Camera off" : "Camera on"}</button>
@@ -212,7 +259,11 @@ export default function InterviewRoom() {
                 <strong>{message.role === "recruiter" ? "You" : "Recruiter assistant"}</strong>
                 {message.pending || message.role === "recruiter"
                   ? <p>{message.pending ? "Thinking…" : message.text}</p>
-                  : <FormattedMessage text={message.text} />}
+                : <>{message.text && <FormattedMessage text={message.text} />}{message.suggestion && <div className="interview-assistant-suggestion">
+                  <strong><b>Suggested question:</b> {message.suggestion.question}</strong>
+                  {message.suggestion.requirement && <small>Related requirement: {message.suggestion.requirement}</small>}
+                  <p><b>Reference answer:</b> {message.suggestion.reference_answer}</p>
+                </div>}</>}
               </article>)}
             </div>
             <form onSubmit={(event) => void ask(event)}><input value={assistantPrompt} onChange={(event) => setAssistantPrompt(event.target.value)}
@@ -246,7 +297,10 @@ export default function InterviewRoom() {
               (profileOrder.indexOf(right) < 0 ? 99 : profileOrder.indexOf(right)))
             .map(([key, value]) => <ProfileSection key={key} name={key} value={value} />)}
         </section>
-        <section className="card interview-questions"><div className="interview-questions-heading"><div><p className="eyebrow">PREPARED QUESTIONS</p><h2>Interview guide</h2></div>
+        <section className="card interview-questions"><div className="interview-guide-tabs">
+          <button className={guideTab === "questions" ? "active" : ""} onClick={() => setGuideTab("questions")}>Prepared questions</button>
+          <button className={guideTab === "jd" ? "active" : ""} onClick={() => setGuideTab("jd")}>Job description</button>
+        </div>{guideTab === "questions" && <><div className="interview-questions-heading"><div><p className="eyebrow">PREPARED QUESTIONS</p><h2>Interview guide</h2></div>
           {session?.status !== "ended" && <div className="interview-question-actions">
             <button className="secondary" disabled={busy} onClick={() => void regenerateQuestionSet()}>{busy ? "Generating…" : "Regenerate short questions"}</button>
             <button className="secondary" onClick={() => {
@@ -257,7 +311,8 @@ export default function InterviewRoom() {
             <button className="secondary" onClick={() => setQuestionDraft((current) => current.filter((_, position) => position !== index))}>Remove</button>
           </div>)}</div><button className="secondary" onClick={() => setQuestionDraft((current) => [...current, ""])}>Add question</button>
             <button disabled={busy || !questionDraft.some((item) => item.trim())} onClick={() => void saveQuestions()}>Save questions</button></>
-          : <ol>{session?.questions.map((item, index) => <li key={index}>{item.text}</li>)}</ol>}
+          : <ol>{session?.questions.map((item, index) => <li key={index}><strong>{item.text}</strong>{item.reference_answer && <details><summary>Reference answer</summary><p>{item.reference_answer}</p></details>}</li>)}</ol>}</>}
+          {guideTab === "jd" && <JobDescriptionSection job={session?.job_description || {}} disabled={busy || session?.status === "ended"} onGenerate={() => void regenerateQuestionSet()} />}
         </section>
       </aside>
     </div>

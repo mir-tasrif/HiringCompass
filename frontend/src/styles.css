@@ -267,16 +267,18 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
 .cv-batch-item { color: var(--muted); font-size: .82rem; }
 .f5-workspace { display: grid; gap: 11px; padding: 14px; }
 .f5-workspace h4 { margin: 8px 0 4px; }
-.f5-roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 7px; }
-.f5-roster label { display: flex; gap: 7px; align-items: center; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; font-size: .82rem; }
-.f5-run-list { display: flex; gap: 6px; flex-wrap: wrap; max-height: 130px; overflow: auto; }
-.f5-run-list button { max-width: 260px; text-align: left; white-space: normal; font-size: .78rem; }
-.f5-result { display: grid; gap: 7px; max-height: 58vh; overflow: auto; border-top: 1px solid var(--border); padding-top: 8px; }
+.f5-run-picker { display: flex; align-items: center; gap: 10px; font-size: .82rem; font-weight: 650; }
+.f5-run-picker select { min-width: 0; max-width: 560px; flex: 1; }
+.f5-content { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; height: min(68vh, 680px); border-top: 1px solid var(--border); }
+.f5-result { display: block; min-height: 0; overflow: auto; padding: 8px 4px 12px 0; }
 .f5-result p, .f5-result li { font-size: .82rem; overflow-wrap: anywhere; }
-.f5-result details { border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
-.f5-result details .history-event { margin-top: 7px; }
+.f5-footer { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); background: var(--surface); }
+.f5-footer details { max-height: 24vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.f5-footer details .history-event { margin-top: 7px; }
+.f5-footer .review-actions { padding: 8px 0 0; }
 .f5-result select[multiple], .f5-result textarea { display: block; width: 100%; min-height: 76px; margin: 5px 0 8px; }
-.f5-result .candidate-actions { flex-wrap: wrap; align-items: center; }
+.f5-footer select[multiple], .f5-footer textarea { display: block; width: 100%; min-height: 76px; margin: 5px 0 8px; }
+.f5-footer .candidate-actions { flex-wrap: wrap; align-items: center; }
 .candidate-profile { display: grid; gap: 12px; padding: 16px; border-top: 1px solid var(--border); }
 .candidate-profile h3, .candidate-profile h4 { margin: 0 0 6px; }
 .candidate-profile pre { overflow: auto; max-height: 240px; margin: 0; padding: 10px; border-radius: 8px; background: var(--bg); color: var(--text); white-space: pre-wrap; font: .78rem/1.45 ui-monospace, Consolas, monospace; }
@@ -482,3 +484,19 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
   .cv-list-toolbar { align-items: flex-start; }
   .candidate-actions { flex-direction: column; }
 }
+.interview-assistant-suggestion { margin-top: 8px; padding: 8px; border-left: 3px solid var(--accent); background: #f1f7ff; border-radius: 6px; }
+.interview-assistant-suggestion > strong { display: block; line-height: 1.45; }
+.interview-assistant-suggestion small { display: block; margin-top: 5px; color: var(--muted); }
+.interview-assistant-suggestion p { margin-top: 7px; font-size: .92em; }
+.interview-guide-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: -2px -2px 12px; }
+.interview-guide-tabs button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 7px 9px; font-size: 12px; }
+.interview-guide-tabs button.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+.interview-questions details { margin-top: 5px; font-size: 11px; color: var(--muted); }
+.interview-questions details p { margin: 5px 0 0; line-height: 1.4; }
+.interview-job-description { min-height: 0; overflow: auto; }
+.interview-jd-section { padding: 9px 0; border-bottom: 1px solid var(--border); }
+.interview-jd-section h3 { margin: 0 0 6px; font-size: .78rem; color: var(--text); }
+.interview-jd-section p { margin: 0; font-size: 11px; line-height: 1.45; }
+.interview-jd-section ul { margin: 0; padding-left: 18px; font-size: 11px; line-height: 1.45; }
+.interview-jd-meta { display: grid; gap: 6px; padding: 9px 0; font-size: 11px; }
+.interview-stt-status { display: grid; gap: 3px; font-size: 10px; line-height: 1.3; color: var(--muted); }
